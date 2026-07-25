@@ -61,17 +61,21 @@ def main() -> None:
     # data-testid="stElementContainer"は各要素を包むdiv（Streamlit 1.3x以降）。
     # 直前に置いた目印(id="page-nav-anchor")を含むコンテナの次の兄弟コンテナ
     # （＝ラジオボタン本体）だけをposition: stickyにする。
+    # 背景色はvar(--background-color)がメイン画面では未定義のため常にフォール
+    # バック値（白）が使われてしまい、ダークテーマだと白背景に白文字でタブが
+    # 見えなくなっていた。st.context.themeで実テーマを判定して色を決め打ちする。
+    nav_bg_color = "#0e1117" if st.context.theme.type == "dark" else "#ffffff"
     st.markdown(
-        """
+        f"""
         <style>
-        div[data-testid="stElementContainer"]:has(#page-nav-anchor) + div[data-testid="stElementContainer"] {
+        div[data-testid="stElementContainer"]:has(#page-nav-anchor) + div[data-testid="stElementContainer"] {{
             position: sticky;
             top: 2.875rem;
             z-index: 999;
-            background-color: var(--background-color, #ffffff);
+            background-color: {nav_bg_color};
             padding-top: 0.5rem;
             padding-bottom: 0.5rem;
-        }
+        }}
         </style>
         <div id="page-nav-anchor"></div>
         """,
