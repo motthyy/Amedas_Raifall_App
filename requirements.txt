@@ -10,6 +10,7 @@ xlsxwriter>=3.2
 requests>=2.32
 httpx>=0.27
 beautifulsoup4>=4.12
+pdfplumber>=0.11
 playwright>=1.46
 PyYAML>=6.0
 tenacity>=8.5

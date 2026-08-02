@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from amedas_rainfall.config import AppConfig
+from amedas_rainfall.jma.ame_master_pdf import (
+    AmeMasterPdfError,
+    attach_precip_start_dates,
+    fetch_ame_master_pdf_bytes,
+    parse_ame_master_pdf,
+    save_ame_master_pdf_cache,
+)
 from amedas_rainfall.jma.direct_client import JmaDirectClient
 from amedas_rainfall.jma.download_manager import DownloadManager, DownloadManagerConfig
 from amedas_rainfall.jma.start_date_finder import default_start_year_hint, find_earliest_valid_year
@@ -21,6 +29,8 @@ from amedas_rainfall.jma.station_catalog import (
 from amedas_rainfall.models import JobStatus
 from amedas_rainfall.storage.repositories import JobRepository
 
+logger = logging.getLogger(__name__)
+
 JST = dt.timezone(dt.timedelta(hours=9))
 
 DOWNLOAD_CHUNK_SIZE = 3
@@ -32,6 +42,10 @@ st.rerun()の呼び出し回数が増える（オーバーヘッドは小さい�
 
 def _station_master_path(config: AppConfig):
     return config.resolved_path("paths.station_master_dir") / "stations.parquet"
+
+
+def _ame_master_pdf_cache_path(config: AppConfig):
+    return config.resolved_path("paths.ame_master_pdf_dir") / "precip_start_dates.parquet"
 
 
 def render_station_page(config: AppConfig) -> None:
@@ -57,6 +71,26 @@ def render_station_page(config: AppConfig) -> None:
                 df = build_station_master(
                     client, wait_seconds=config.get("download.normal_wait_seconds", 3.0), progress_callback=_cb
                 )
+
+                status_text.text("気象庁「地域気象観測所一覧」PDFから降水量観測開始日を取得しています...")
+                try:
+                    pdf_bytes = fetch_ame_master_pdf_bytes(
+                        url=config.get(
+                            "jma_master_pdf.url",
+                            "https://www.jma.go.jp/jma/kishou/know/amedas/ame_master.pdf",
+                        ),
+                        user_agent=config.get("download.user_agent"),
+                    )
+                    ame_master_df = parse_ame_master_pdf(pdf_bytes)
+                    save_ame_master_pdf_cache(ame_master_df, _ame_master_pdf_cache_path(config))
+                    df = attach_precip_start_dates(df, ame_master_df)
+                except AmeMasterPdfError:
+                    logger.exception("観測所一覧PDFの取得・解析に失敗しました。降水量観測開始日は未設定のままとします。")
+                    st.warning(
+                        "気象庁「地域気象観測所一覧」PDFの取得・解析に失敗しました。"
+                        "降水量観測開始日は未設定のままになります（「開始年を探索する」による手動調査は引き続き利用できます）。"
+                    )
+
                 save_station_master(df, master_path)
             st.success(f"{len(df)}件の地点情報を取得しました。")
             st.session_state.pop("station_master_df", None)
@@ -144,11 +178,41 @@ def render_station_page(config: AppConfig) -> None:
         )
         st.plotly_chart(fig, use_container_width=True, theme=None)
 
+    pdf_precip_start_date = station_row.get("precip_start_date")
+    if pdf_precip_start_date is not None and pd.notna(pdf_precip_start_date):
+        pdf_precip_start_date = pd.Timestamp(pdf_precip_start_date).date()
+    else:
+        pdf_precip_start_date = None
+
+    is_amedas = station_row["station_type"] == "アメダス"
+    hint_year = pdf_precip_start_date.year if pdf_precip_start_date else default_start_year_hint(is_amedas)
+
+    if st.session_state.get("_station_page_active_code") != selected_code:
+        # st.number_input/st.date_inputはkeyが既にsession_stateにある場合value引数を
+        # 無視するため、地点切替時はウィジェット生成前にここで明示的に書き換える。
+        # そうしないと前の地点で選んだ値が残り続け、新しい地点のPDF由来の開始日が
+        # 自動反映されない。ユーザーは以降自由に変更できる。
+        st.session_state["_station_page_active_code"] = selected_code
+        st.session_state.pop("start_search_result", None)
+        st.session_state["station_manual_year"] = hint_year
+        st.session_state["station_plan_start"] = pdf_precip_start_date or dt.date(hint_year, 1, 1)
+
     st.divider()
     st.subheader("時別降水量の取得可能開始日時の調査")
 
-    is_amedas = station_row["station_type"] == "アメダス"
-    hint_year = default_start_year_hint(is_amedas)
+    if pdf_precip_start_date:
+        st.caption(
+            f"気象庁「地域気象観測所一覧」より: 降水量観測開始日 {pdf_precip_start_date:%Y-%m-%d}"
+            "（ダウンロード計画の開始日に自動反映されます。下記の「開始年を探索する」で"
+            "実測に基づく調査結果に置き換えることもできます）"
+        )
+    else:
+        st.caption(
+            "気象庁「地域気象観測所一覧」に降水量観測開始日の情報が見つかりませんでした"
+            "（地点マスタが未更新か、地点名の突き合わせができなかった可能性があります）。"
+            "下記の「開始年を探索する」で実測に基づき調査してください。"
+        )
+
     manual_year = st.number_input(
         "探索開始年（手動修正可）", min_value=1875, max_value=dt.date.today().year, value=hint_year,
         key="station_manual_year",
@@ -183,12 +247,18 @@ def render_station_page(config: AppConfig) -> None:
     st.divider()
     st.subheader("ダウンロード計画")
 
-    default_start = (
-        dt.date(st.session_state["start_search_result"].earliest_valid_datetime.year, 1, 1)
-        if st.session_state.get("start_search_result")
+    if (
+        st.session_state.get("start_search_result")
         and st.session_state["start_search_result"].earliest_valid_datetime
-        else dt.date(int(manual_year), 1, 1)
-    )
+    ):
+        # 1. 実測探索（「開始年を探索する」）の結果を最優先する（ユーザーが明示的に実行した結果のため）。
+        default_start = dt.date(st.session_state["start_search_result"].earliest_valid_datetime.year, 1, 1)
+    elif pdf_precip_start_date:
+        # 2. 気象庁「地域気象観測所一覧」PDF由来の観測開始日を自動反映する。
+        default_start = pdf_precip_start_date
+    else:
+        # 3. どちらもなければ従来どおりの粗いヒントにフォールバックする。
+        default_start = dt.date(int(manual_year), 1, 1)
     plan_start = st.date_input("開始日", value=default_start, key="station_plan_start")
     yesterday = dt.date.today() - dt.timedelta(days=1)
     plan_end = st.date_input(

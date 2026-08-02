@@ -30,6 +30,7 @@ STATION_MASTER_COLUMNS = [
     "has_precipitation_observation",
     "metadata_fetched_at",
     "discontinued_date_text",
+    "precip_start_date",
 ]
 
 
@@ -107,6 +108,14 @@ def station_master_cache_exists(path: Path) -> bool:
 
 
 def row_to_station(row: pd.Series) -> Station:
+    precip_start_date = row["precip_start_date"] if "precip_start_date" in row else None
+    hourly_precip_start_hint = None
+    if precip_start_date is not None and pd.notna(precip_start_date):
+        if isinstance(precip_start_date, dt.date) and not isinstance(precip_start_date, dt.datetime):
+            hourly_precip_start_hint = precip_start_date
+        else:
+            hourly_precip_start_hint = pd.Timestamp(precip_start_date).date()
+
     return Station(
         prefecture=row["prefecture"],
         station_name=row["station_name"],
@@ -121,4 +130,5 @@ def row_to_station(row: pd.Series) -> Station:
         is_discontinued=bool(row["is_discontinued"]),
         has_precipitation_observation=bool(row["has_precipitation_observation"]),
         metadata_fetched_at=row["metadata_fetched_at"],
+        hourly_precip_start_hint=hourly_precip_start_hint,
     )

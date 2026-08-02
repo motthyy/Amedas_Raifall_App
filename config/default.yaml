@@ -6,6 +6,7 @@
 paths:
   data_dir: "data"
   station_master_dir: "data/station_master"
+  ame_master_pdf_dir: "data/ame_master_pdf"
   raw_dir: "data/raw"
   normalized_dir: "data/normalized"
   calculated_dir: "data/calculated"
@@ -14,6 +15,9 @@ paths:
   state_dir: "state"
   logs_dir: "logs"
   jobs_db: "state/jobs.sqlite"
+
+jma_master_pdf:
+  url: "https://www.jma.go.jp/jma/kishou/know/amedas/ame_master.pdf"
 
 download:
   mode: "direct"          # direct | playwright
