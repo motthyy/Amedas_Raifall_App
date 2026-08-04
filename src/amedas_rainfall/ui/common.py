@@ -51,3 +51,33 @@ def ensure_indices_loaded(config: AppConfig, station_code: str, force_recompute:
 
     st.session_state[cache_key] = indices_df
     return indices_df
+
+
+def render_interactive_chart(fig, key: str) -> None:
+    """グラフをインタラクティブ表示する（マウスホイールでズーム、点クリックで日時・値を表示）。
+
+    画像出力（export_figure）には渡したfigをそのまま使うため、ここで行う表示上の
+    工夫（scrollZoom, on_select）はエクスポート画像の見た目に一切影響しない。
+    """
+    event = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        theme=None,
+        config={"scrollZoom": True},
+        on_select="rerun",
+        selection_mode=["points"],
+        key=key,
+    )
+    points = event.selection.points if event and event.selection else []
+    if points:
+        lines = []
+        for p in points:
+            curve_number = p.get("curve_number")
+            trace_name = fig.data[curve_number].name if curve_number is not None else None
+            x = p.get("x")
+            y = p.get("y")
+            label = f"{trace_name}: " if trace_name else ""
+            lines.append(f"{label}日時={x} / 値={y}")
+        st.info("選択した点:\n" + "\n".join(lines))
+    else:
+        st.caption("ヒント: グラフ上の点をクリックすると日時と値が表示されます。マウスホイールでズームできます。")

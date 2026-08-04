@@ -9,7 +9,7 @@ import streamlit as st
 
 from amedas_rainfall.config import AppConfig
 from amedas_rainfall.pipeline import normalized_hourly_path
-from amedas_rainfall.ui.common import ensure_indices_loaded
+from amedas_rainfall.ui.common import ensure_indices_loaded, render_interactive_chart
 from amedas_rainfall.visualization.export import build_export_filename, export_figure, save_plot_settings
 from amedas_rainfall.visualization.styles import PlotStyle
 from amedas_rainfall.visualization.timeseries import INDICATOR_LABELS, build_timeseries_figure
@@ -99,16 +99,12 @@ def render_timeseries_page(config: AppConfig) -> None:
     view = indices_df.loc[mask]
 
     st.subheader("表示項目")
-    bar_column = st.radio(
-        "上段（棒グラフ）", ["rainfall_raw_mm", "rainfall_used_mm"], format_func=lambda c: {
-            "rainfall_raw_mm": "時雨量", "rainfall_used_mm": "閾値処理後時雨量"
-        }[c], horizontal=True, key="ts_bar_column",
-    )
+    bar_column = "rainfall_raw_mm"
     indicator_options = list(INDICATOR_LABELS.keys())
     selected_indicators = st.multiselect(
         "下段（折れ線グラフ、複数選択可）",
         indicator_options,
-        default=["estimated_soil_rainfall_mm"],
+        default=["soil_rainfall_mm"],
         format_func=lambda c: INDICATOR_LABELS.get(c, c),
         key="ts_selected_indicators",
     )
@@ -147,7 +143,7 @@ def render_timeseries_page(config: AppConfig) -> None:
 
     missing_mask = view["is_missing"] if "is_missing" in view.columns else None
     fig = build_timeseries_figure(view, bar_column, selected_indicators, style, missing_mask=missing_mask)
-    st.plotly_chart(fig, use_container_width=True, theme=None)
+    render_interactive_chart(fig, key=f"ts_chart_{station_code}")
 
     st.subheader("画像出力")
     fmt = st.selectbox("形式", ["png", "svg", "pdf"], key="ts_fmt")

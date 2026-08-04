@@ -13,7 +13,7 @@ from amedas_rainfall.pipeline import (
     normalized_hourly_path,
 )
 from amedas_rainfall.statistics.bootstrap import sample_size_warnings
-from amedas_rainfall.ui.common import ensure_indices_loaded
+from amedas_rainfall.ui.common import ensure_indices_loaded, render_interactive_chart
 from amedas_rainfall.statistics.gumbel import STANDARD_RETURN_PERIODS, analyze_gumbel
 from amedas_rainfall.visualization.export import build_export_filename, export_figure
 from amedas_rainfall.visualization.probability import build_probability_figure
@@ -21,13 +21,12 @@ from amedas_rainfall.visualization.styles import PlotStyle
 
 INDICATOR_LABELS_JA = {
     "rainfall_raw_mm": "時雨量（年最大時間雨量、比較用）",
-    "rainfall_used_mm": "閾値処理後時雨量",
     "continuous_rainfall_12h_mm": "12時間無降雨リセット連続雨量",
     "rolling_rainfall_24h_mm": "24時間移動雨量",
-    "effective_rainfall_1_5h_mm": "実効雨量(半減期1.5時間)",
+    "effective_rainfall_3h_mm": "実効雨量(半減期3時間)",
     "effective_rainfall_6h_mm": "実効雨量(半減期6時間)",
     "effective_rainfall_24h_mm": "実効雨量(半減期24時間)",
-    "estimated_soil_rainfall_mm": "推定土壌雨量指数",
+    "soil_rainfall_mm": "土壌雨量",
 }
 BOUNDARY_LABELS = {"calendar": "暦年", "fiscal": "年度", "june_start": "6月始まり年"}
 
@@ -133,7 +132,7 @@ def render_probability_page(config: AppConfig) -> None:
         x_log=x_log,
         indicator_label=INDICATOR_LABELS_JA[indicator],
     )
-    st.plotly_chart(fig, use_container_width=True, theme=None)
+    render_interactive_chart(fig, key=f"prob_chart_{station_code}")
 
     st.subheader("確率雨量表（確率年1〜30・50・100年）")
     table_rows = []

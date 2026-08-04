@@ -1,11 +1,9 @@
-"""推定10分雨量と気象庁標準3段タンクモデルによる推定土壌雨量指数の計算（9節）。
+"""推定10分雨量と気象庁標準3段タンクモデルによる土壌雨量の計算（9節）。
 
 重要な留意点（README/仕様書にも明記）:
     気象庁が公表する「土壌雨量指数」そのものではない。気象庁から取得可能なのは
     時別値のみであるため、1時間雨量を6等分して10分雨量を推定した上で、
     気象庁標準3段タンクモデルの係数体系を用いて独自に計算した値である。
-    画面上・出力上は必ず「推定土壌雨量指数」と表示し、「気象庁公表土壌雨量指数」
-    とは表示しない。
 
 出典:
     気象庁「土壌雨量指数」に関する技術資料に示される標準3段タンクモデルの
@@ -26,21 +24,22 @@ TEN_MIN_COLUMN = "rainfall_10min_mm"
 TANK1_COLUMN = "soil_tank_1_mm"
 TANK2_COLUMN = "soil_tank_2_mm"
 TANK3_COLUMN = "soil_tank_3_mm"
-SOIL_INDEX_COLUMN = "estimated_soil_rainfall_mm"
+SOIL_INDEX_COLUMN = "soil_rainfall_mm"
+
+ZERO_FLOOR_MM = 0.3
 
 
-def disaggregate_hourly_to_10min(rainfall_used_mm: pd.Series) -> pd.Series:
-    """閾値処理後時雨量を10分雨量へ均等分配する（1時間雨量を6等分）。
+def disaggregate_hourly_to_10min(rainfall_raw_mm: pd.Series) -> pd.Series:
+    """時雨量を10分雨量へ均等分配する（1時間雨量を6等分）。
 
     気象庁の時別値は「当該時刻までの1時間」の積算値であるため、時刻 t の
     値は (t-50分, t-40分, ..., t) の6個の10分値に等分配する。
-    時雨量が0（無降雨とみなされた場合を含む）であれば6個とも0とする。
-    欠測（NaN）の時間は6個ともNaNとする。
+    時雨量が0であれば6個とも0とする。欠測（NaN）の時間は6個ともNaNとする。
     """
     parts = []
     for offset_min in (50, 40, 30, 20, 10, 0):
-        shifted_index = rainfall_used_mm.index - pd.Timedelta(minutes=offset_min)
-        part = pd.Series(rainfall_used_mm.to_numpy() / 6.0, index=shifted_index)
+        shifted_index = rainfall_raw_mm.index - pd.Timedelta(minutes=offset_min)
+        part = pd.Series(rainfall_raw_mm.to_numpy() / 6.0, index=shifted_index)
         parts.append(part)
     combined = pd.concat(parts).sort_index()
     combined.name = TEN_MIN_COLUMN
@@ -199,16 +198,21 @@ def run_tank_model_10min(
 
 
 def aggregate_tank_result_to_hourly(tank_10min: pd.DataFrame) -> pd.DataFrame:
-    """10分刻みのタンク計算結果を、各時間の6回目更新後の値として時別化する。"""
+    """10分刻みのタンク計算結果を、各時間の6回目更新後の値として時別化する。
+
+    土壌雨量（3タンク合計）は理論上0に漸近し続けるだけで厳密には0にならない
+    ため、0.3mm未満になった時点で0に丸める（``ZERO_FLOOR_MM``）。この丸めは
+    出力値のみに適用し、各タンクの内部貯留量（タンク間の流出・浸透の計算）
+    には影響しない。
+    """
     hourly = tank_10min.resample("h", label="right", closed="right").last()
-    hourly[SOIL_INDEX_COLUMN] = (
-        hourly[TANK1_COLUMN] + hourly[TANK2_COLUMN] + hourly[TANK3_COLUMN]
-    )
+    total = hourly[TANK1_COLUMN] + hourly[TANK2_COLUMN] + hourly[TANK3_COLUMN]
+    hourly[SOIL_INDEX_COLUMN] = total.where(total.isna() | (total >= ZERO_FLOOR_MM), other=0.0)
     return hourly[[TANK1_COLUMN, TANK2_COLUMN, TANK3_COLUMN, SOIL_INDEX_COLUMN]]
 
 
-def calculate_estimated_soil_rainfall_index(
-    rainfall_used_mm: pd.Series,
+def calculate_soil_rainfall(
+    rainfall_raw_mm: pd.Series,
     config: TankModelConfig,
     progress_callback: Callable[[float], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -217,7 +221,7 @@ def calculate_estimated_soil_rainfall_index(
     Returns:
         (10分刻みDataFrame, 時別DataFrame) のタプル。
     """
-    rainfall_10min = disaggregate_hourly_to_10min(rainfall_used_mm)
+    rainfall_10min = disaggregate_hourly_to_10min(rainfall_raw_mm)
     tank_10min = run_tank_model_10min(rainfall_10min, config, progress_callback=progress_callback)
     tank_hourly = aggregate_tank_result_to_hourly(tank_10min)
     return tank_10min, tank_hourly

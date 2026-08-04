@@ -1,7 +1,7 @@
 """12時間無降雨リセット連続雨量の計算。
 
 仕様（README/指示書 8.1節）:
-    - 計算用時雨量が0より大きい時刻から一連降雨を開始し、その雨量を累積する。
+    - 時雨量が0より大きい時刻から一連降雨を開始し、その雨量を累積する。
     - 無降雨が12時間未満の場合、途中で雨が止んでも同じ一連降雨として扱い、
       連続雨量を保持する（減算しない）。
     - 無降雨が12時間連続した時点で、連続雨量を0にリセットする。
@@ -26,22 +26,22 @@ WARMUP_COLUMN = "warmup_flag"
 
 
 def calculate_continuous_rainfall(
-    rainfall_used_mm: pd.Series,
+    rainfall_raw_mm: pd.Series,
     dry_hours_reset: int = 12,
 ) -> pd.DataFrame:
     """12時間無降雨リセット連続雨量を計算する。
 
     Args:
-        rainfall_used_mm: 閾値処理後時雨量（時間間隔=1時間の連続インデックス、
+        rainfall_raw_mm: 時雨量（時間間隔=1時間の連続インデックス、
             欠測はNaNとして表現）。
         dry_hours_reset: 連続雨量をリセットする無降雨時間数（既定12時間）。
 
     Returns:
         入力と同じインデックスを持つDataFrame。
     """
-    n = len(rainfall_used_mm)
-    index = rainfall_used_mm.index
-    values = rainfall_used_mm.to_numpy(dtype=float)
+    n = len(rainfall_raw_mm)
+    index = rainfall_raw_mm.index
+    values = rainfall_raw_mm.to_numpy(dtype=float)
 
     cum = np.full(n, np.nan)
     dry = np.full(n, np.nan)

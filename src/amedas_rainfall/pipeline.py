@@ -17,10 +17,10 @@ from amedas_rainfall.config import AppConfig, load_tank_model_config
 from amedas_rainfall.indices.continuous_rainfall import calculate_continuous_rainfall
 from amedas_rainfall.indices.effective_rainfall import calculate_all_effective_rainfall
 from amedas_rainfall.indices.rolling_rainfall import calculate_rolling_rainfall
-from amedas_rainfall.indices.soil_tank import TankModelConfig, calculate_estimated_soil_rainfall_index
+from amedas_rainfall.indices.soil_tank import TankModelConfig, calculate_soil_rainfall
 from amedas_rainfall.jma.csv_parser import parse_jma_hourly_precipitation_csv
 from amedas_rainfall.processing.merging import merge_hourly_frames
-from amedas_rainfall.processing.normalization import add_used_rainfall_column, reindex_to_continuous_hourly
+from amedas_rainfall.processing.normalization import reindex_to_continuous_hourly
 from amedas_rainfall.statistics.annual_maxima import (
     ALL_YEAR_BOUNDARIES,
     calculate_annual_completeness,
@@ -29,13 +29,12 @@ from amedas_rainfall.statistics.annual_maxima import (
 
 INDICATOR_COLUMNS_FOR_ANNUAL_MAXIMA = [
     "rainfall_raw_mm",
-    "rainfall_used_mm",
     "continuous_rainfall_12h_mm",
     "rolling_rainfall_24h_mm",
-    "effective_rainfall_1_5h_mm",
+    "effective_rainfall_3h_mm",
     "effective_rainfall_6h_mm",
     "effective_rainfall_24h_mm",
-    "estimated_soil_rainfall_mm",
+    "soil_rainfall_mm",
 ]
 
 
@@ -71,7 +70,6 @@ def rebuild_normalized_from_raw(config: AppConfig, station_code: str, station_na
 
     merged = merge_hourly_frames(frames, names)
     merged = reindex_to_continuous_hourly(merged)
-    merged = add_used_rainfall_column(merged)
 
     out_path = normalized_hourly_path(config, station_code)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +91,7 @@ def compute_all_indices(
 
     Args:
         progress_callback: (進捗率0.0〜1.0, 状況メッセージ) を通知するコールバック。
-            推定土壌雨量指数（3段タンクモデル、10分刻み）が最も計算量が多いため、
+            土壌雨量（3段タンクモデル、10分刻み）が最も計算量が多いため、
             その内部進捗もこの範囲へマッピングして報告する。
     """
 
@@ -101,28 +99,28 @@ def compute_all_indices(
         if progress_callback is not None:
             progress_callback(fraction, message)
 
-    used = hourly_df["rainfall_used_mm"]
+    raw = hourly_df["rainfall_raw_mm"]
 
     _report(0.0, "連続雨量を計算しています...")
-    continuous = calculate_continuous_rainfall(used, dry_hours_reset=config.get("rainfall.dry_hours_reset", 12))
+    continuous = calculate_continuous_rainfall(raw, dry_hours_reset=config.get("rainfall.dry_hours_reset", 12))
 
     _report(0.05, "24時間移動雨量を計算しています...")
-    rolling = calculate_rolling_rainfall(used, window_hours=config.get("rainfall.rolling_window_hours", 24))
+    rolling = calculate_rolling_rainfall(raw, window_hours=config.get("rainfall.rolling_window_hours", 24))
 
     _report(0.10, "実効雨量を計算しています...")
     effective = calculate_all_effective_rainfall(
-        used, half_lives_hours=config.get("rainfall.effective_half_lives_hours", [1.5, 6, 24])
+        raw, half_lives_hours=config.get("rainfall.effective_half_lives_hours", [3, 6, 24])
     )
 
-    _report(0.15, "推定土壌雨量指数を計算しています...")
+    _report(0.15, "土壌雨量を計算しています...")
     tank_raw = load_tank_model_config()
     tank_config = TankModelConfig.from_dict(tank_raw)
 
     def _tank_progress(fraction: float) -> None:
-        _report(0.15 + fraction * 0.80, "推定土壌雨量指数を計算しています...")
+        _report(0.15 + fraction * 0.80, "土壌雨量を計算しています...")
 
-    tank_10min, tank_hourly = calculate_estimated_soil_rainfall_index(
-        used, tank_config, progress_callback=_tank_progress
+    tank_10min, tank_hourly = calculate_soil_rainfall(
+        raw, tank_config, progress_callback=_tank_progress
     )
 
     _report(0.95, "計算結果をまとめています...")

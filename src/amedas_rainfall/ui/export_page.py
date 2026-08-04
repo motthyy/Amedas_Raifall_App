@@ -114,7 +114,6 @@ def render_export_page(config: AppConfig) -> None:
         missing_table = indices_df[indices_df.get("is_missing", pd.Series(dtype=bool)).fillna(False)] if "is_missing" in indices_df.columns else pd.DataFrame()
         conditions_table = pd.DataFrame(
             [
-                {"項目": "無降雨閾値(mm/h)", "値": config.get("rainfall.no_rain_threshold_mm")},
                 {"項目": "連続雨量リセット時間(h)", "値": config.get("rainfall.dry_hours_reset")},
                 {"項目": "移動雨量窓(h)", "値": config.get("rainfall.rolling_window_hours")},
                 {"項目": "実効雨量半減期(h)", "値": str(config.get("rainfall.effective_half_lives_hours"))},

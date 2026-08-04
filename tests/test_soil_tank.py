@@ -15,17 +15,13 @@ from amedas_rainfall.indices.soil_tank import (
     disaggregate_hourly_to_10min,
     run_tank_model_10min,
 )
-from amedas_rainfall.processing.normalization import apply_no_rain_threshold
-
-
 def _hourly_series(values: list[float]) -> pd.Series:
     index = pd.date_range("2020-01-01", periods=len(values), freq="h", tz="Asia/Tokyo")
     return pd.Series(values, index=index, dtype=float)
 
 
 def test_zero_rainfall_gives_six_zeros() -> None:
-    used = apply_no_rain_threshold(pd.Series([0.3]))
-    s = _hourly_series(used.tolist())
+    s = _hourly_series([0.0])
     result = disaggregate_hourly_to_10min(s)
     assert (result == 0.0).all()
     assert len(result) == 6

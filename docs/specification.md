@@ -25,7 +25,7 @@
 | ダウンロードジョブ管理（分割・再試行・中断再開） | `jma/download_manager.py`, `storage/database.py`, `storage/repositories.py` |
 | 正規化・重複統合 | `processing/normalization.py`, `processing/quality.py`, `processing/merging.py` |
 | 雨量指標計算 | `indices/continuous_rainfall.py`, `indices/rolling_rainfall.py`, `indices/effective_rainfall.py` |
-| 推定土壌雨量指数 | `indices/soil_tank.py` |
+| 土壌雨量 | `indices/soil_tank.py` |
 | 年最大値・完全性 | `statistics/annual_maxima.py` |
 | ガンベル分布・確率雨量 | `statistics/gumbel.py`, `statistics/bootstrap.py` |
 | 可視化・画像出力 | `visualization/timeseries.py`, `visualization/probability.py`, `visualization/styles.py`, `visualization/export.py` |
@@ -59,9 +59,9 @@ CP932（Shift_JIS拡張）優先でデコードし、UTF-8へのフォールバ�
 
 ## 指標
 
-原時雨量、閾値処理後時雨量（0.3mm以下は無降雨）、12時間無降雨リセット連続雨量、
-24時間移動雨量、実効雨量（半減期1.5h/6h/24h）、推定土壌雨量指数（気象庁標準
-3段タンクモデル、10分雨量は時別値の均等6分配による推定）。
+時雨量、12時間無降雨リセット連続雨量、24時間移動雨量、実効雨量（半減期3h/6h/24h、
+0.3mm未満で0に丸め）、土壌雨量（気象庁標準3段タンクモデル、10分雨量は時別値の
+均等6分配による推定、0.3mm未満で0に丸め）。
 
 ## 年最大値・確率雨量
 

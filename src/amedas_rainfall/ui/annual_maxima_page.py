@@ -13,20 +13,19 @@ import streamlit as st
 
 from amedas_rainfall.config import AppConfig
 from amedas_rainfall.pipeline import compute_annual_maxima_all_boundaries, normalized_hourly_path
-from amedas_rainfall.ui.common import ensure_indices_loaded
+from amedas_rainfall.ui.common import ensure_indices_loaded, render_interactive_chart
 from amedas_rainfall.visualization.annual_maxima import build_annual_maxima_figure
 from amedas_rainfall.visualization.export import build_export_filename, export_figure, save_plot_settings
 from amedas_rainfall.visualization.styles import PlotStyle
 
 INDICATOR_LABELS_JA = {
     "rainfall_raw_mm": "時雨量（年最大時間雨量）",
-    "rainfall_used_mm": "閾値処理後時雨量",
     "continuous_rainfall_12h_mm": "12時間無降雨リセット連続雨量",
     "rolling_rainfall_24h_mm": "24時間移動雨量",
-    "effective_rainfall_1_5h_mm": "実効雨量(半減期1.5時間)",
+    "effective_rainfall_3h_mm": "実効雨量(半減期3時間)",
     "effective_rainfall_6h_mm": "実効雨量(半減期6時間)",
     "effective_rainfall_24h_mm": "実効雨量(半減期24時間)",
-    "estimated_soil_rainfall_mm": "推定土壌雨量指数",
+    "soil_rainfall_mm": "土壌雨量",
 }
 BOUNDARY_LABELS = {"calendar": "暦年", "fiscal": "年度", "june_start": "6月始まり年"}
 
@@ -102,7 +101,7 @@ def render_annual_maxima_page(config: AppConfig) -> None:
     fig = build_annual_maxima_figure(
         maxima_df, style, y_axis_label=f"{INDICATOR_LABELS_JA[indicator]} [mm]"
     )
-    st.plotly_chart(fig, use_container_width=True, theme=None)
+    render_interactive_chart(fig, key=f"am_chart_{station_code}")
 
     st.subheader("年最大値一覧")
     st.dataframe(
