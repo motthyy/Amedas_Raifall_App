@@ -8,6 +8,9 @@
 
 観測開始時（および欠測明けの最初の有効時刻）の初期値は0とし、
 ``state_reset_due_to_gap`` / ``warmup_flag`` を付与する。
+
+値は理論上0に漸近し続けるだけで厳密には0にならないため、0.3mm未満に
+なった時点で0に丸める（``ZERO_FLOOR_MM``）。
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ import pandas as pd
 RESET_DUE_TO_GAP_COLUMN = "state_reset_due_to_gap"
 WARMUP_COLUMN = "warmup_flag"
 
+ZERO_FLOOR_MM = 0.3
+
 
 def half_life_to_decay_rate(half_life_hours: float) -> float:
     """半減期から1時間あたりの残存率 a_H を求める。"""
@@ -25,24 +30,25 @@ def half_life_to_decay_rate(half_life_hours: float) -> float:
 
 
 def calculate_effective_rainfall(
-    rainfall_used_mm: pd.Series,
+    rainfall_raw_mm: pd.Series,
     half_life_hours: float,
     column_name: str,
 ) -> pd.DataFrame:
     """指定した半減期の実効雨量を計算する。
 
     Args:
-        rainfall_used_mm: 閾値処理後時雨量（1時間間隔の連続インデックス、欠測はNaN）。
+        rainfall_raw_mm: 時雨量（1時間間隔の連続インデックス、欠測はNaN）。
         half_life_hours: 半減期[時間]。
         column_name: 出力列名。
 
     Returns:
-        実効雨量列と状態フラグ列を持つDataFrame。
+        実効雨量列と状態フラグ列を持つDataFrame。値は理論上0に漸近し続けるが、
+        ``ZERO_FLOOR_MM`` (0.3mm) 未満になった時点で0に丸める。
     """
     decay = half_life_to_decay_rate(half_life_hours)
-    n = len(rainfall_used_mm)
-    index = rainfall_used_mm.index
-    values = rainfall_used_mm.to_numpy(dtype=float)
+    n = len(rainfall_raw_mm)
+    index = rainfall_raw_mm.index
+    values = rainfall_raw_mm.to_numpy(dtype=float)
 
     out = np.full(n, np.nan)
     reset_due_to_gap = np.zeros(n, dtype=bool)
@@ -63,6 +69,8 @@ def calculate_effective_rainfall(
             cur = val + decay * prev
         else:
             cur = val + decay * prev
+        if cur < ZERO_FLOOR_MM:
+            cur = 0.0
         out[i] = cur
         prev = cur
 
@@ -78,14 +86,14 @@ def calculate_effective_rainfall(
 
 
 def calculate_all_effective_rainfall(
-    rainfall_used_mm: pd.Series,
+    rainfall_raw_mm: pd.Series,
     half_lives_hours: list[float] | None = None,
     column_map: dict[float, str] | None = None,
 ) -> pd.DataFrame:
     """複数の半減期について実効雨量をまとめて計算する。"""
-    half_lives_hours = half_lives_hours or [1.5, 6.0, 24.0]
+    half_lives_hours = half_lives_hours or [3.0, 6.0, 24.0]
     column_map = column_map or {
-        1.5: "effective_rainfall_1_5h_mm",
+        3.0: "effective_rainfall_3h_mm",
         6.0: "effective_rainfall_6h_mm",
         24.0: "effective_rainfall_24h_mm",
     }
@@ -94,7 +102,7 @@ def calculate_all_effective_rainfall(
     warmup = None
     for hl in half_lives_hours:
         col = column_map.get(hl, f"effective_rainfall_{hl}h_mm")
-        df = calculate_effective_rainfall(rainfall_used_mm, hl, col)
+        df = calculate_effective_rainfall(rainfall_raw_mm, hl, col)
         frames.append(df[[col]])
         if state_reset is None:
             state_reset = df[RESET_DUE_TO_GAP_COLUMN]

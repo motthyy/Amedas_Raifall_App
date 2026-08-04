@@ -32,10 +32,9 @@ download:
   request_timeout_seconds: 30
 
 rainfall:
-  no_rain_threshold_mm: 0.3
   dry_hours_reset: 12
   rolling_window_hours: 24
-  effective_half_lives_hours: [1.5, 6, 24]
+  effective_half_lives_hours: [3, 6, 24]
   ten_minute_disaggregation: "equal_split"   # 1時間雨量を6等分する仮定
 
 year_boundaries:

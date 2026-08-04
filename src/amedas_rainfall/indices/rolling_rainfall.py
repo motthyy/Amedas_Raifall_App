@@ -13,9 +13,9 @@ ROLLING_COLUMN = "rolling_rainfall_24h_mm"
 
 
 def calculate_rolling_rainfall(
-    rainfall_used_mm: pd.Series,
+    rainfall_raw_mm: pd.Series,
     window_hours: int = 24,
 ) -> pd.DataFrame:
     """直近window_hours時間の移動雨量合計を計算する。"""
-    rolling_sum = rainfall_used_mm.rolling(window=window_hours, min_periods=window_hours).sum()
-    return pd.DataFrame({ROLLING_COLUMN: rolling_sum}, index=rainfall_used_mm.index)
+    rolling_sum = rainfall_raw_mm.rolling(window=window_hours, min_periods=window_hours).sum()
+    return pd.DataFrame({ROLLING_COLUMN: rolling_sum}, index=rainfall_raw_mm.index)

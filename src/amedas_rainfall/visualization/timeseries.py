@@ -36,10 +36,10 @@ CPU 6倍スロットリング環境で期間変更のたびに合計約9.6秒の
 INDICATOR_LABELS = {
     "continuous_rainfall_12h_mm": "12時間無降雨リセット連続雨量 [mm]",
     "rolling_rainfall_24h_mm": "24時間移動雨量 [mm]",
-    "effective_rainfall_1_5h_mm": "実効雨量(半減期1.5時間) [mm]",
+    "effective_rainfall_3h_mm": "実効雨量(半減期3時間) [mm]",
     "effective_rainfall_6h_mm": "実効雨量(半減期6時間) [mm]",
     "effective_rainfall_24h_mm": "実効雨量(半減期24時間) [mm]",
-    "estimated_soil_rainfall_mm": "推定土壌雨量指数",
+    "soil_rainfall_mm": "土壌雨量",
     "soil_tank_1_mm": "第1タンク貯留量 [mm]",
     "soil_tank_2_mm": "第2タンク貯留量 [mm]",
     "soil_tank_3_mm": "第3タンク貯留量 [mm]",
@@ -47,7 +47,6 @@ INDICATOR_LABELS = {
 
 RAINFALL_BAR_LABELS = {
     "rainfall_raw_mm": "時雨量 [mm/h]",
-    "rainfall_used_mm": "閾値処理後時雨量 [mm/h]",
 }
 
 
@@ -258,6 +257,14 @@ def _apply_common_layout(fig: go.Figure, style: PlotStyle) -> None:
         spikedash="dot",
         spikethickness=1,
         spikecolor="#666666",
+        # Plotlyの既定日付フォーマッタは英語月名("Jan 2026"等)を使うため、
+        # ズーム段階ごとに日本語の数値月表記へ明示的に置き換える。
+        tickformatstops=[
+            dict(dtickrange=[None, 1000 * 60 * 60 * 24], value="%H:%M"),
+            dict(dtickrange=[1000 * 60 * 60 * 24, 1000 * 60 * 60 * 24 * 30], value="%-m/%-d"),
+            dict(dtickrange=[1000 * 60 * 60 * 24 * 30, 1000 * 60 * 60 * 24 * 366], value="%Y年%-m月"),
+            dict(dtickrange=[1000 * 60 * 60 * 24 * 366, None], value="%Y年"),
+        ],
     )
     fig.update_yaxes(
         showgrid=style.show_grid,

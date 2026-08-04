@@ -13,7 +13,6 @@ from amedas_rainfall.indices.continuous_rainfall import (
     WARMUP_COLUMN,
     calculate_continuous_rainfall,
 )
-from amedas_rainfall.processing.normalization import apply_no_rain_threshold
 
 
 def _series(values: list[float | None]) -> pd.Series:
@@ -54,19 +53,6 @@ def test_new_event_starts_after_reset() -> None:
     result = calculate_continuous_rainfall(s)
     assert result[CONTINUOUS_COLUMN].iloc[13] == 3.0
     assert result[EVENT_ID_COLUMN].iloc[13] != result[EVENT_ID_COLUMN].iloc[0]
-
-
-def test_threshold_0_3_is_no_rain_0_4_is_rain() -> None:
-    raw = pd.Series([0.0, 0.1, 0.2, 0.3, 0.4], dtype=float)
-    used = apply_no_rain_threshold(raw)
-    assert used.tolist() == [0.0, 0.0, 0.0, 0.0, 0.4]
-
-
-def test_missing_values_are_not_zeroed_by_threshold() -> None:
-    raw = pd.Series([0.5, np.nan, 1.0], dtype=float)
-    used = apply_no_rain_threshold(raw)
-    assert used.iloc[1] != used.iloc[1]  # NaN check
-    assert np.isnan(used.iloc[1])
 
 
 def test_gap_resets_state_with_flags() -> None:
