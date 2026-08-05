@@ -37,6 +37,26 @@ INDICATOR_COLUMNS_FOR_ANNUAL_MAXIMA = [
     "soil_rainfall_mm",
 ]
 
+EXPECTED_INDICES_COLUMNS = [
+    "continuous_rainfall_12h_mm",
+    "rolling_rainfall_24h_mm",
+    "effective_rainfall_3h_mm",
+    "effective_rainfall_6h_mm",
+    "effective_rainfall_24h_mm",
+    "soil_tank_1_mm",
+    "soil_tank_2_mm",
+    "soil_tank_3_mm",
+    "soil_rainfall_mm",
+]
+"""compute_all_indicesが生成する列名の一覧。
+
+指標の計算ロジックが変更され列名が変わった場合（例: estimated_soil_rainfall_mm
+→ soil_rainfall_mm への改名）、正規化済みデータ自体は更新されないためmtime比較
+だけでは古いキャッシュ（indices.parquet）が有効なままとみなされてしまい、
+新しい列がグラフに表示されない不具合になっていた。読み込んだキャッシュに
+これらの列が揃っているかを確認し、欠けていれば再計算する。
+"""
+
 
 def normalized_hourly_path(config: AppConfig, station_code: str) -> Path:
     base = config.resolved_path("paths.normalized_dir")
@@ -152,7 +172,9 @@ def load_or_compute_all_indices(
 
     if not force_recompute and cache_path.exists() and hourly_path.exists():
         if cache_path.stat().st_mtime >= hourly_path.stat().st_mtime:
-            return pd.read_parquet(cache_path)
+            cached = pd.read_parquet(cache_path)
+            if set(EXPECTED_INDICES_COLUMNS).issubset(cached.columns):
+                return cached
 
     if hourly_df is None:
         hourly_df = load_normalized_hourly(config, station_code)
