@@ -83,6 +83,20 @@ class JobRepository:
             )
             return [self._row_to_job(r) for r in cur.fetchall()]
 
+    def get_stuck_downloading_jobs(self, station_code: str) -> list[DownloadJob]:
+        """DOWNLOADING状態のまま止まっているジョブを取得する。
+
+        アプリの異常終了やプロセスの強制終了により、DOWNLOADING状態の更新が
+        SUCCESS/FAILEDへ進まないまま残ったジョブは`get_actionable_jobs`の
+        対象外(PENDING/RETRY_WAITではない)のため、自動再開されない。
+        """
+        with get_connection(self.db_path) as conn:
+            cur = conn.execute(
+                "SELECT * FROM download_jobs WHERE station_code=? AND status=? ORDER BY start_date",
+                (station_code, JobStatus.DOWNLOADING.value),
+            )
+            return [self._row_to_job(r) for r in cur.fetchall()]
+
     def get_successful_jobs(self, station_code: str) -> list[DownloadJob]:
         with get_connection(self.db_path) as conn:
             cur = conn.execute(

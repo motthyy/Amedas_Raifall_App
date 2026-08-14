@@ -268,8 +268,9 @@ def render_station_page(config: AppConfig) -> None:
     st.caption(
         "ダウンロード開始を押すと、1件ずつ順番に取得・保存を確認しながら最新データまで自動的に"
         "続けて取得します（気象庁サイトへの負荷対策として待機時間を挟みます）。"
-        "失敗した期間は自動的に次の期間へ進み、後で「失敗期間を再試行対象に戻す」からやり直せます。"
+        "失敗した期間は自動的に次の期間へ進み、後で「失敗・中断ジョブを再試行対象に戻す」からやり直せます。"
         "ジョブ状態はSQLiteに保存されるため、アプリを閉じても次回起動時に続きから再開できます。"
+        "強制終了などでダウンロードが中断された場合も、同じボタンから再試行できます。"
     )
 
     db_path = config.resolved_path("paths.jobs_db")
@@ -302,11 +303,21 @@ def render_station_page(config: AppConfig) -> None:
         st.dataframe(jobs_df, use_container_width=True, height=250)
 
         non_split_jobs = [j for j in jobs if j.status != JobStatus.SPLIT]
-        n_pending = sum(1 for j in non_split_jobs if j.status in (JobStatus.PENDING, JobStatus.RETRY_WAIT))
+        n_pending = sum(
+            1 for j in non_split_jobs
+            if j.status in (JobStatus.PENDING, JobStatus.RETRY_WAIT, JobStatus.DOWNLOADING)
+        )
         n_success = sum(1 for j in non_split_jobs if j.status in (JobStatus.SUCCESS, JobStatus.VALIDATED))
         n_failed = sum(1 for j in non_split_jobs if j.status == JobStatus.FAILED)
         n_total = len(non_split_jobs)
         st.caption(f"完了: {n_success} / 未完了: {n_pending} / 失敗: {n_failed} / 合計: {n_total}")
+        n_stuck = sum(1 for j in non_split_jobs if j.status == JobStatus.DOWNLOADING)
+        if n_stuck and not st.session_state.get(f"auto_download_running_{selected_code}", False):
+            st.warning(
+                f"{n_stuck}件のジョブがダウンロード中の状態のまま止まっています。"
+                "前回アプリが強制終了された可能性があります。"
+                "「失敗・中断ジョブを再試行対象に戻す」を押して再試行してください。"
+            )
 
         auto_run_key = f"auto_download_running_{selected_code}"
         is_running = st.session_state.get(auto_run_key, False)
@@ -318,7 +329,7 @@ def render_station_page(config: AppConfig) -> None:
                 use_container_width=True, disabled=is_running,
             )
         with b2:
-            if st.button("失敗期間を再試行対象に戻す", key="station_retry_failed_button"):
+            if st.button("失敗・中断ジョブを再試行対象に戻す", key="station_retry_failed_button"):
                 n = manager.retry_failed(selected_code)
                 st.success(f"{n}件のジョブを再試行対象(PENDING)に戻しました。")
                 st.rerun()

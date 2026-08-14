@@ -228,8 +228,15 @@ class DownloadManager:
         self.job_repo.update_job(job.job_id, status=JobStatus.PENDING.value)
 
     def retry_failed(self, station_code: str) -> int:
-        """FAILED状態のジョブをPENDINGへ戻し、再試行対象にする。"""
+        """FAILED状態、および異常終了で中断されたDOWNLOADING状態のジョブをPENDINGへ戻す。
+
+        DOWNLOADING状態はダウンロード処理の途中でのみ設定され、正常終了時は
+        必ずSUCCESSかFAILEDへ遷移する。ジョブ一覧を取得した時点でDOWNLOADING
+        状態のジョブが残っている場合、アプリのクラッシュや強制終了により中断
+        されたものとみなし、再試行対象に含める。
+        """
         failed = self.job_repo.get_failed_jobs(station_code)
-        for job in failed:
+        stuck = self.job_repo.get_stuck_downloading_jobs(station_code)
+        for job in failed + stuck:
             self.job_repo.update_job(job.job_id, status=JobStatus.PENDING.value, error_message=None)
-        return len(failed)
+        return len(failed) + len(stuck)
