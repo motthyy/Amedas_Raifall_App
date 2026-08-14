@@ -77,6 +77,7 @@ def build_probability_figure(
     )
     fig.update_yaxes(
         title_text=f"{indicator_label} [mm]",
+        rangemode="tozero",
         showgrid=style.show_grid,
         gridcolor="#e0e0e0",
         tickfont=dict(size=style.tick_size, color=style.font_color),
@@ -115,4 +116,48 @@ def build_probability_figure(
         fig.update_xaxes(range=list(style.x_range))
     if style.y_range:
         fig.update_yaxes(range=list(style.y_range))
+
+    if style.horizontal_lines or style.vertical_lines:
+        # ログ軸にadd_vlineで指定範囲外のxを追加すると、Plotlyの自動レンジ計算が
+        # 桁外れの値（10^30等）まで暴走することがあるため、線を追加する前に
+        # 実データ（トレース＋線の位置）に基づく軸範囲を明示的に固定しておく。
+        if style.x_range is None:
+            x_values = [v for trace in fig.data if trace.x is not None for v in trace.x if v is not None]
+            x_values += [vline["x"] for vline in style.vertical_lines]
+            if x_values:
+                x_lo, x_hi = min(x_values), max(x_values)
+                if x_log:
+                    x_lo = max(x_lo, 1e-3)
+                    x_hi = max(x_hi, x_lo * 1.01)
+                    log_lo, log_hi = math.log10(x_lo), math.log10(x_hi)
+                    pad = (log_hi - log_lo) * 0.05 or 0.1
+                    fig.update_xaxes(range=[log_lo - pad, log_hi + pad])
+                else:
+                    pad = (x_hi - x_lo) * 0.05 or 1.0
+                    fig.update_xaxes(range=[x_lo - pad, x_hi + pad])
+        if style.y_range is None:
+            # 縦軸は常に0からスタートさせる（雨量は負にならないため）。
+            y_values = [v for trace in fig.data if trace.y is not None for v in trace.y if v is not None]
+            y_values += [hline["y"] for hline in style.horizontal_lines]
+            if y_values:
+                y_hi = max(y_values)
+                pad = y_hi * 0.05 or 1.0
+                fig.update_yaxes(range=[0, y_hi + pad])
+
+    for hline in style.horizontal_lines:
+        fig.add_hline(
+            y=hline["y"],
+            line_dash="dash",
+            line_color=hline.get("color", "gray"),
+            annotation_text=hline.get("label", ""),
+            annotation_position=hline.get("position", "top right"),
+        )
+    for vline in style.vertical_lines:
+        fig.add_vline(
+            x=vline["x"],
+            line_dash="dash",
+            line_color=vline.get("color", "gray"),
+            annotation_text=vline.get("label", ""),
+        )
+
     return fig

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,7 +16,11 @@ from amedas_rainfall.pipeline import (
 )
 from amedas_rainfall.statistics.bootstrap import sample_size_warnings
 from amedas_rainfall.ui.common import ensure_indices_loaded, render_interactive_chart
-from amedas_rainfall.statistics.gumbel import STANDARD_RETURN_PERIODS, analyze_gumbel
+from amedas_rainfall.statistics.gumbel import (
+    STANDARD_RETURN_PERIODS,
+    analyze_gumbel,
+    return_period_from_value,
+)
 from amedas_rainfall.visualization.export import build_export_filename, export_figure
 from amedas_rainfall.visualization.probability import build_probability_figure
 from amedas_rainfall.visualization.styles import PlotStyle
@@ -114,6 +120,24 @@ def render_probability_page(config: AppConfig) -> None:
 
     gumbel_result = analyze_gumbel(annual_maxima_values, method=method, plotting_position=plotting_position)
 
+    st.subheader("任意雨量の再現確率")
+    input_value = st.number_input(
+        "検討する雨量[mm]（0のときは非表示）", min_value=0.0, value=0.0, step=1.0,
+        key="prob_input_value",
+    )
+    input_return_period = None
+    if input_value > 0:
+        input_return_period = return_period_from_value(
+            gumbel_result.parameters.loc_mu, gumbel_result.parameters.scale_beta, input_value
+        )
+        if math.isfinite(input_return_period) and input_return_period > 1:
+            st.success(
+                f"{input_value:.1f} mm の再現確率年は 約{input_return_period:.1f}年"
+                f"（年超過確率 約{100 / input_return_period:.2f}%）です。"
+            )
+        else:
+            st.warning("この雨量は算出範囲外のため再現確率年を計算できませんでした。")
+
     with st.expander("グラフ調整"):
         style = PlotStyle(title=f"{station_name} 確率雨量（{INDICATOR_LABELS_JA[indicator]}・{BOUNDARY_LABELS[boundary_key]}）")
         style.width = st.number_input("図幅(px)", value=float(style.width), key="prob_fig_width")
@@ -121,6 +145,17 @@ def render_probability_page(config: AppConfig) -> None:
         style.dpi = st.selectbox("DPI(PNG用)", [300, 600, 1200], key="prob_fig_dpi")
         show_observed = st.checkbox("観測点表示", value=True, key="prob_show_observed")
         show_fit_line = st.checkbox("適合線表示", value=True, key="prob_show_fit_line")
+
+    if input_value > 0 and input_return_period is not None and math.isfinite(input_return_period) and input_return_period > 1:
+        style.horizontal_lines = [
+            {
+                "y": input_value,
+                "label": f"再現確率 約{input_return_period:.1f}年",
+                "position": "left",
+                "color": "#e377c2",
+            }
+        ]
+        style.vertical_lines = [{"x": input_return_period, "color": "#e377c2"}]
 
     fig = build_probability_figure(
         annual_maxima_values,

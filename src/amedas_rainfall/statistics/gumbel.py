@@ -88,6 +88,14 @@ def return_period_value(mu: float, beta: float, return_period_years: float) -> f
     return mu - beta * math.log(-math.log(1.0 - 1.0 / return_period_years))
 
 
+def return_period_from_value(mu: float, beta: float, x: float) -> float:
+    """雨量xに対応する確率年Tを計算する（ガンベル分布の逆関数）。F=1のときはinfを返す。"""
+    f = float(gumbel_cdf(x, mu, beta))
+    if f >= 1.0:
+        return float("inf")
+    return 1.0 / (1.0 - f)
+
+
 def return_period_values(
     mu: float, beta: float, return_periods_years: list[float] | None = None
 ) -> dict[float, float]:

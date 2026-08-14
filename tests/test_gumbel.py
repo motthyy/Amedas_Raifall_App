@@ -14,6 +14,7 @@ from amedas_rainfall.statistics.gumbel import (
     analyze_gumbel,
     fit_gumbel_mle,
     fit_gumbel_moments,
+    return_period_from_value,
     return_period_value,
 )
 
@@ -59,6 +60,26 @@ def test_return_period_value_is_monotonically_increasing() -> None:
     mu, beta = 100.0, 20.0
     values = [return_period_value(mu, beta, t) for t in [2, 5, 10, 20, 50, 100, 200, 500]]
     assert all(b > a for a, b in zip(values, values[1:]))
+
+
+def test_return_period_from_value_round_trips_with_return_period_value() -> None:
+    mu, beta = 100.0, 20.0
+    for t in [2, 5, 10, 20, 50, 100, 200]:
+        x = return_period_value(mu, beta, t)
+        recovered_t = return_period_from_value(mu, beta, x)
+        assert recovered_t == pytest.approx(t, rel=1e-6)
+
+
+def test_return_period_from_value_is_monotonically_increasing() -> None:
+    mu, beta = 100.0, 20.0
+    values = [return_period_from_value(mu, beta, x) for x in [50, 80, 100, 150, 200, 300]]
+    assert all(b > a for a, b in zip(values, values[1:]))
+
+
+def test_return_period_from_value_approaches_one_for_small_x() -> None:
+    mu, beta = 100.0, 20.0
+    t = return_period_from_value(mu, beta, -1000.0)
+    assert t == pytest.approx(1.0, abs=1e-6)
 
 
 def test_analyze_gumbel_returns_all_standard_periods() -> None:
