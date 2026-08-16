@@ -29,6 +29,10 @@ COARSE_STEPS = (10, 5, 1)
 SAFETY_MARGIN_YEARS = 2
 
 
+class StartDateProbeError(RuntimeError):
+    """通信・CSV形式エラー。観測データなしとは区別して呼び出し側へ返す。"""
+
+
 class SupportsCsvDownload(Protocol):
     def download_hourly_precipitation_csv(
         self,
@@ -50,15 +54,18 @@ class StartDateSearchResult:
 
 
 def _probe_year_has_data(client: SupportsCsvDownload, station_code: str, year: int) -> bool:
-    """指定年の1月1〜2日を取得し、品質情報コードが「非対象(0)」以外の行があるか確認する。"""
+    """指定年全体を取得し、欠測/非対象ではない雨量が存在するか確認する。"""
     try:
-        raw = client.download_hourly_precipitation_csv(station_code, year, 1, 1, year, 1, 2)
+        raw = client.download_hourly_precipitation_csv(station_code, year, 1, 1, year, 12, 31)
         parsed = parse_jma_hourly_precipitation_csv(raw)
-    except Exception:
+    except Exception as exc:
         logger.exception("探索用プローブに失敗しました（station=%s, year=%s）", station_code, year)
-        return False
+        raise StartDateProbeError(
+            f"{year}年の確認に失敗しました。通信状態または気象庁CSV形式を確認してください。"
+        ) from exc
     quality = parsed.frame["quality_code"]
-    return bool((quality.notna() & (quality != "0")).any())
+    valid = parsed.frame["rainfall_raw_mm"].notna() & quality.notna() & ~quality.isin(["0", "1"])
+    return bool(valid.any())
 
 
 def find_earliest_valid_year(
@@ -71,10 +78,14 @@ def find_earliest_valid_year(
     """時別降水量が最初に存在する年を探索する（非単調な欠測パターンを考慮）。"""
     checked: list[int] = []
     notes: list[str] = []
+    probe_cache: dict[int, bool] = {}
 
     def probe(year: int) -> bool:
         year = max(EARLIEST_POSSIBLE_YEAR, min(year, current_year))
+        if year in probe_cache:
+            return probe_cache[year]
         result = _probe_year_has_data(client, station_code, year)
+        probe_cache[year] = result
         checked.append(year)
         time.sleep(wait_seconds)
         return result
@@ -83,55 +94,45 @@ def find_earliest_valid_year(
     hint_has_data = probe(hint)
 
     if hint_has_data:
-        # 候補年より前に遡って、データが存在しなくなる年を粗く探す
-        last_found_year = hint
-        boundary_no_data_year: int | None = None
-        for step in COARSE_STEPS:
-            year = last_found_year
-            while True:
-                prev_year = year - step
-                if prev_year < EARLIEST_POSSIBLE_YEAR:
-                    boundary_no_data_year = EARLIEST_POSSIBLE_YEAR - 1
-                    break
-                if probe(prev_year):
-                    last_found_year = prev_year
-                    year = prev_year
-                    continue
-                boundary_no_data_year = prev_year
-                break
-            if boundary_no_data_year == EARLIEST_POSSIBLE_YEAR - 1:
-                break
-
-        earliest_year = last_found_year
-        # 安全マージン: 非単調な欠測を考慮し、境界のさらに前を追加確認する
-        for extra in range(1, SAFETY_MARGIN_YEARS + 1):
-            candidate = earliest_year - extra
-            if candidate < EARLIEST_POSSIBLE_YEAR:
-                break
+        # 10年刻みで「データなし/あり」の境界を作り、その区間を年単位で必ず再走査する。
+        high = hint
+        low = EARLIEST_POSSIBLE_YEAR - 1
+        candidate = hint - COARSE_STEPS[0]
+        while candidate >= EARLIEST_POSSIBLE_YEAR:
             if probe(candidate):
-                notes.append(
-                    f"{earliest_year}年より前の{candidate}年にもデータが存在したため、探索範囲を広げました。"
-                )
-                earliest_year = candidate
+                high = candidate
+                candidate -= COARSE_STEPS[0]
+            else:
+                low = candidate
+                break
+        scan_start = max(EARLIEST_POSSIBLE_YEAR, low + 1)
+        found = [year for year in range(scan_start, high + 1) if probe(year)]
+        earliest_year = min(found) if found else high
+        for candidate in range(
+            max(EARLIEST_POSSIBLE_YEAR, low - SAFETY_MARGIN_YEARS), low + 1
+        ):
+            if probe(candidate):
+                notes.append(f"粗探索境界より前の{candidate}年にもデータが存在しました。")
+                earliest_year = min(earliest_year, candidate)
     else:
-        # 候補年よりデータが新しい場合は前方探索
-        earliest_year = None
-        year = hint
-        for step in COARSE_STEPS:
-            while earliest_year is None:
-                next_year = year + step
-                if next_year > current_year:
-                    break
-                if probe(next_year):
-                    earliest_year = next_year
-                    break
-                year = next_year
-        if earliest_year is None:
+        # 前方の粗探索で見つかった上限までを1年ずつ再走査する。
+        high: int | None = None
+        candidate = hint + COARSE_STEPS[0]
+        while candidate <= current_year:
+            if probe(candidate):
+                high = candidate
+                break
+            candidate += COARSE_STEPS[0]
+        if high is None and probe(current_year):
+            high = current_year
+        if high is None:
             return StartDateSearchResult(
                 earliest_valid_datetime=None,
                 candidate_years_checked=checked,
                 notes=["候補年から現在年までデータが確認できませんでした。手動で開始年を指定してください。"],
             )
+        found = [year for year in range(hint + 1, high + 1) if probe(year)]
+        earliest_year = min(found) if found else high
 
     earliest_valid_datetime = _find_first_valid_hour_in_year(client, station_code, earliest_year, wait_seconds)
     return StartDateSearchResult(
@@ -144,10 +145,17 @@ def find_earliest_valid_year(
 def _find_first_valid_hour_in_year(
     client: SupportsCsvDownload, station_code: str, year: int, wait_seconds: float
 ) -> dt.datetime | None:
-    raw = client.download_hourly_precipitation_csv(station_code, year, 1, 1, year, 12, 31)
-    time.sleep(wait_seconds)
-    parsed = parse_jma_hourly_precipitation_csv(raw)
-    valid = parsed.frame[parsed.frame["quality_code"].notna() & (parsed.frame["quality_code"] != "0")]
+    try:
+        raw = client.download_hourly_precipitation_csv(station_code, year, 1, 1, year, 12, 31)
+        time.sleep(wait_seconds)
+        parsed = parse_jma_hourly_precipitation_csv(raw)
+    except Exception as exc:
+        raise StartDateProbeError(f"{year}年の最初の有効時刻を確定できませんでした。") from exc
+    valid = parsed.frame[
+        parsed.frame["rainfall_raw_mm"].notna()
+        & parsed.frame["quality_code"].notna()
+        & ~parsed.frame["quality_code"].isin(["0", "1"])
+    ]
     if valid.empty:
         return None
     return valid.index.min().to_pydatetime()

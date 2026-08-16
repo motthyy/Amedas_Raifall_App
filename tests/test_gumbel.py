@@ -59,7 +59,12 @@ def test_standard_return_periods_include_required_values() -> None:
 def test_return_period_value_is_monotonically_increasing() -> None:
     mu, beta = 100.0, 20.0
     values = [return_period_value(mu, beta, t) for t in [2, 5, 10, 20, 50, 100, 200, 500]]
-    assert all(b > a for a, b in zip(values, values[1:]))
+    assert all(b > a for a, b in zip(values, values[1:], strict=False))
+
+
+def test_return_period_below_one_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        return_period_value(100.0, 20.0, 0.5)
 
 
 def test_return_period_from_value_round_trips_with_return_period_value() -> None:
@@ -73,7 +78,7 @@ def test_return_period_from_value_round_trips_with_return_period_value() -> None
 def test_return_period_from_value_is_monotonically_increasing() -> None:
     mu, beta = 100.0, 20.0
     values = [return_period_from_value(mu, beta, x) for x in [50, 80, 100, 150, 200, 300]]
-    assert all(b > a for a, b in zip(values, values[1:]))
+    assert all(b > a for a, b in zip(values, values[1:], strict=False))
 
 
 def test_return_period_from_value_approaches_one_for_small_x() -> None:

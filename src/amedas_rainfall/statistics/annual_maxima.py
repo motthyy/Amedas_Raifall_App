@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
-
 import numpy as np
 import pandas as pd
 
@@ -23,9 +21,15 @@ ALL_YEAR_BOUNDARIES: dict[str, YearBoundaryDefinition] = {
 
 
 def _start_year_for_timestamp(ts: pd.Timestamp, boundary: YearBoundaryDefinition) -> int:
-    if (ts.month, ts.day) >= (boundary.start_month, boundary.start_day):
-        return ts.year
-    return ts.year - 1
+    # 気象庁の時別値は「その時刻までの直前1時間」を表し、24時は翌日0時へ
+    # 正規化している。区切り日の0時は前日24時の観測なので前の年区分へ入れる。
+    observation_period = ts - pd.Timedelta(nanoseconds=1)
+    if (observation_period.month, observation_period.day) >= (
+        boundary.start_month,
+        boundary.start_day,
+    ):
+        return observation_period.year
+    return observation_period.year - 1
 
 
 def year_label(start_year: int, boundary: YearBoundaryDefinition) -> str:
@@ -39,7 +43,7 @@ def year_label(start_year: int, boundary: YearBoundaryDefinition) -> str:
 
 
 def year_window(start_year: int, boundary: YearBoundaryDefinition, tz: str = "Asia/Tokyo") -> tuple[pd.Timestamp, pd.Timestamp]:
-    """年区分の[開始, 終了)を返す（終了は排他的な次年区分の開始時刻）。"""
+    """区切り境界を返す。時別観測の対象範囲は(start, end]。"""
     start = pd.Timestamp(
         year=start_year, month=boundary.start_month, day=boundary.start_day, hour=0, tz=tz
     )
@@ -97,6 +101,11 @@ def calculate_annual_completeness(
     data_start: pd.Timestamp | None = None,
     data_end: pd.Timestamp | None = None,
     now: pd.Timestamp | None = None,
+    exclude_incomplete_start_year: bool = True,
+    exclude_incomplete_end_year: bool = True,
+    exclude_ongoing_latest_year: bool = True,
+    exclude_below_completeness: bool = True,
+    exclude_state_reset_unreliable: bool = True,
 ) -> list[AnnualCompleteness]:
     """年区分ごとのデータ完全性を評価し、既定の採否判定を付ける。
 
@@ -119,30 +128,48 @@ def calculate_annual_completeness(
     now = now or pd.Timestamp.now(tz=tz)
 
     start_year_min = _start_year_for_timestamp(data_start, boundary)
-    start_year_max = _start_year_for_timestamp(data_end, boundary) + 1
+    start_year_max = _start_year_for_timestamp(data_end, boundary)
 
     results: list[AnnualCompleteness] = []
     for start_year in range(start_year_min, start_year_max + 1):
         win_start, win_end = year_window(start_year, boundary, tz=str(tz))
-        mask = (index >= win_start) & (index < win_end)
-        expected_hours = int(mask.sum())
+        if win_start >= now:
+            continue
+        expected_start = win_start + pd.Timedelta(hours=1)
+        expected_end = min(win_end, now.floor("h"))
+        expected_index = pd.date_range(
+            start=expected_start,
+            end=expected_end,
+            freq="h",
+            inclusive="both",
+            tz=str(tz),
+        )
+        expected_hours = len(expected_index)
         if expected_hours == 0:
             continue
-        valid_hours = int(valid_mask.loc[mask].sum())
+        window_valid = valid_mask.reindex(expected_index, fill_value=False).fillna(False).astype(bool)
+        valid_hours = int(window_valid.sum())
         missing_hours = expected_hours - valid_hours
         completeness = 100.0 * valid_hours / expected_hours if expected_hours else 0.0
-        has_reset = bool(state_reset_mask.loc[mask].any()) if state_reset_mask is not None else False
+        has_reset = (
+            bool(state_reset_mask.reindex(expected_index, fill_value=False).fillna(False).any())
+            if state_reset_mask is not None
+            else False
+        )
 
         reasons: list[str] = []
-        is_incomplete_start = win_start < data_start <= win_end
+        is_incomplete_start = expected_start < data_start <= win_end
+        is_incomplete_end = expected_start <= data_end < win_end and win_end <= now
         is_ongoing_latest = win_end > now
-        if is_incomplete_start:
+        if is_incomplete_start and exclude_incomplete_start_year:
             reasons.append("観測開始を含む不完全年")
-        if is_ongoing_latest:
+        if is_incomplete_end and exclude_incomplete_end_year:
+            reasons.append("データ終了を含む不完全年")
+        if is_ongoing_latest and exclude_ongoing_latest_year:
             reasons.append("実行時点で終了していない最新年区分")
-        if completeness < completeness_threshold_percent:
+        if completeness < completeness_threshold_percent and exclude_below_completeness:
             reasons.append(f"データ完全率が{completeness_threshold_percent}%未満")
-        if has_reset:
+        if has_reset and exclude_state_reset_unreliable:
             reasons.append("大きな欠測により状態量が再初期化された区間を含む")
 
         is_eligible = len(reasons) == 0

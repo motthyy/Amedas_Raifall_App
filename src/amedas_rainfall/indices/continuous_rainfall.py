@@ -16,7 +16,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-CONTINUOUS_COLUMN = "continuous_rainfall_12h_mm"
+from amedas_rainfall.indicators import DEFAULT_CONTINUOUS_COLUMN, continuous_column
+
+CONTINUOUS_COLUMN = DEFAULT_CONTINUOUS_COLUMN
 DRY_HOURS_COLUMN = "dry_hours"
 EVENT_ID_COLUMN = "rain_event_id"
 EVENT_START_COLUMN = "rain_event_start"
@@ -28,6 +30,7 @@ WARMUP_COLUMN = "warmup_flag"
 def calculate_continuous_rainfall(
     rainfall_raw_mm: pd.Series,
     dry_hours_reset: int = 12,
+    column_name: str | None = None,
 ) -> pd.DataFrame:
     """12時間無降雨リセット連続雨量を計算する。
 
@@ -39,6 +42,9 @@ def calculate_continuous_rainfall(
     Returns:
         入力と同じインデックスを持つDataFrame。
     """
+    if dry_hours_reset <= 0:
+        raise ValueError("dry_hours_resetは1以上で指定してください。")
+    output_column = column_name or continuous_column(dry_hours_reset)
     n = len(rainfall_raw_mm)
     index = rainfall_raw_mm.index
     values = rainfall_raw_mm.to_numpy(dtype=float)
@@ -59,15 +65,24 @@ def calculate_continuous_rainfall(
     cur_event_id = 0
     cur_event_start = pd.NaT
     cur_event_last_rain = pd.NaT
-    pending_reset = True  # 最初の有効値はwarmupとして扱う
+    pending_reset = False
+    seen_valid = False
 
     for i in range(n):
         val = values[i]
         if np.isnan(val):
-            pending_reset = True
+            if seen_valid:
+                pending_reset = True
             continue
 
-        if pending_reset:
+        if not seen_valid:
+            cur_cum = 0.0
+            cur_dry = dry_hours_reset
+            cur_event_start = pd.NaT
+            cur_event_last_rain = pd.NaT
+            warmup[i] = True
+            seen_valid = True
+        elif pending_reset:
             cur_cum = 0.0
             cur_dry = dry_hours_reset
             cur_event_start = pd.NaT
@@ -96,7 +111,7 @@ def calculate_continuous_rainfall(
 
     result = pd.DataFrame(
         {
-            CONTINUOUS_COLUMN: cum,
+            output_column: cum,
             DRY_HOURS_COLUMN: dry,
             EVENT_ID_COLUMN: event_id,
             EVENT_START_COLUMN: pd.Series(event_start, index=index),

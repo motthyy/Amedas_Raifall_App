@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import pandas as pd
 
-ROLLING_COLUMN = "rolling_rainfall_24h_mm"
+from amedas_rainfall.indicators import DEFAULT_ROLLING_COLUMN, rolling_column
+
+ROLLING_COLUMN = DEFAULT_ROLLING_COLUMN
 
 
 def calculate_rolling_rainfall(
     rainfall_raw_mm: pd.Series,
     window_hours: int = 24,
+    column_name: str | None = None,
 ) -> pd.DataFrame:
     """直近window_hours時間の移動雨量合計を計算する。"""
+    if window_hours <= 0:
+        raise ValueError("window_hoursは1以上で指定してください。")
+    output_column = column_name or rolling_column(window_hours)
     rolling_sum = rainfall_raw_mm.rolling(window=window_hours, min_periods=window_hours).sum()
-    return pd.DataFrame({ROLLING_COLUMN: rolling_sum}, index=rainfall_raw_mm.index)
+    return pd.DataFrame({output_column: rolling_sum}, index=rainfall_raw_mm.index)

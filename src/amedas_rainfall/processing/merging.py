@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from amedas_rainfall.processing.quality import CandidateRecord, resolve_duplicates
@@ -31,11 +33,13 @@ def merge_hourly_frames(frames: list[pd.DataFrame], source_files: list[str]) -> 
                 "source_file",
                 "is_missing",
                 "is_conflicting",
+                "conflict_values",
+                "conflict_sources",
             ]
         )
 
     grouped: dict[pd.Timestamp, list[CandidateRecord]] = {}
-    for frame, source in zip(frames, source_files):
+    for frame, source in zip(frames, source_files, strict=True):
         for ts, row in frame.iterrows():
             grouped.setdefault(ts, []).append(
                 CandidateRecord(
@@ -60,6 +64,22 @@ def merge_hourly_frames(frames: list[pd.DataFrame], source_files: list[str]) -> 
                 "source_file": resolved.source_file,
                 "is_missing": resolved.quality_code in (None, "1", "0") or resolved.rainfall_raw_mm is None,
                 "is_conflicting": resolved.is_conflicting,
+                "conflict_values": (
+                    json.dumps(
+                        [candidate.rainfall_raw_mm for candidate in resolved.conflict_candidates],
+                        ensure_ascii=False,
+                    )
+                    if resolved.is_conflicting
+                    else None
+                ),
+                "conflict_sources": (
+                    json.dumps(
+                        [candidate.source_file for candidate in resolved.conflict_candidates],
+                        ensure_ascii=False,
+                    )
+                    if resolved.is_conflicting
+                    else None
+                ),
             }
         )
 

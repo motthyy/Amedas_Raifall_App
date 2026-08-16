@@ -12,9 +12,13 @@ from amedas_rainfall.indices.soil_tank import (
     TANK2_COLUMN,
     TANK3_COLUMN,
     TankModelConfig,
+    calculate_soil_rainfall,
+    calculate_soil_rainfall_hourly,
     disaggregate_hourly_to_10min,
     run_tank_model_10min,
 )
+
+
 def _hourly_series(values: list[float]) -> pd.Series:
     index = pd.date_range("2020-01-01", periods=len(values), freq="h", tz="Asia/Tokyo")
     return pd.Series(values, index=index, dtype=float)
@@ -37,7 +41,7 @@ def test_0_4mm_splits_equally_into_six() -> None:
 def test_ten_minute_sum_matches_hourly_value() -> None:
     s = _hourly_series([12.0, 0.0, 3.6])
     result = disaggregate_hourly_to_10min(s)
-    for hour_end, expected in zip(s.index, s.tolist()):
+    for hour_end, expected in zip(s.index, s.tolist(), strict=True):
         window = result[(result.index > hour_end - pd.Timedelta(hours=1)) & (result.index <= hour_end)]
         assert len(window) == 6
         assert abs(window.sum() - expected) < 1e-9
@@ -136,3 +140,17 @@ def test_known_hand_calculation_single_step() -> None:
     expected_infil3 = 0.01 * expected_infil2 * dt
     expected_tank3 = expected_infil2 - expected_infil3
     assert result[TANK3_COLUMN].iloc[0] == pytest.approx(expected_tank3)
+
+
+def test_memory_efficient_hourly_kernel_matches_reference_with_gap(
+    tank_config: TankModelConfig,
+) -> None:
+    rng = np.random.default_rng(123)
+    values = rng.choice([0.0, 0.0, 1.0, 8.0, 30.0], size=500).astype(float)
+    values[100:105] = np.nan
+    rainfall = _hourly_series(values.tolist())
+
+    _, reference = calculate_soil_rainfall(rainfall, tank_config)
+    optimized = calculate_soil_rainfall_hourly(rainfall, tank_config)
+
+    pd.testing.assert_frame_equal(optimized, reference.reindex(optimized.index))

@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from amedas_rainfall.indicators import indicator_label
 from amedas_rainfall.visualization.styles import PlotStyle
 
 MAX_DISPLAY_POINTS = 5_000
@@ -67,19 +68,42 @@ def _downsample_for_display(
     if n <= max_points:
         return df, missing_mask
 
-    bucket_size = math.ceil(n / max_points)
-    bucket = np.arange(n) // bucket_size
-
     cols = [c for c in {bar_column, *indicator_columns} if c in df.columns]
-    grouped = df[cols].groupby(bucket)
-    downsampled = grouped.max()
-    representative_time = df.index.to_series().groupby(bucket).first()
-    downsampled.index = pd.DatetimeIndex(representative_time.values, tz=df.index.tz)
+    # バケット先頭へ各列の最大値を寄せると、実際には別時刻のピークが同時発生した
+    # ように見え、tz付きIndexの.values経由ではJSTが9時間ずれる。各バケットから
+    # 実在する先頭・末尾・各列の最小/最大発生時刻を選び、元行をそのまま残す。
+    points_per_bucket = max(2, 2 + 2 * len(cols) + (1 if missing_mask is not None else 0))
+    bucket_count = max(1, max_points // points_per_bucket)
+    bucket_size = max(1, math.ceil(n / bucket_count))
+    selected_positions: set[int] = set()
+    aligned_missing = (
+        missing_mask.reindex(df.index, fill_value=False).fillna(False).astype(bool)
+        if missing_mask is not None
+        else None
+    )
 
-    down_missing = None
-    if missing_mask is not None and bar_column in downsampled.columns:
-        down_missing = downsampled[bar_column].isna()
+    for start in range(0, n, bucket_size):
+        end = min(start + bucket_size, n)
+        selected_positions.update((start, end - 1))
+        chunk = df.iloc[start:end]
+        for column in cols:
+            valid = chunk[column].dropna()
+            if valid.empty:
+                continue
+            selected_positions.add(df.index.get_loc(valid.idxmax()))
+            selected_positions.add(df.index.get_loc(valid.idxmin()))
+        if aligned_missing is not None:
+            missing_positions = np.flatnonzero(aligned_missing.iloc[start:end].to_numpy())
+            if len(missing_positions):
+                selected_positions.add(start + int(missing_positions[0]))
 
+    positions = sorted(selected_positions)
+    if len(positions) > max_points:
+        # 理論上はpoints_per_bucket以下だが、境界条件でも上限を保証する。
+        keep = np.linspace(0, len(positions) - 1, max_points, dtype=int)
+        positions = [positions[i] for i in keep]
+    downsampled = df.iloc[positions]
+    down_missing = aligned_missing.iloc[positions] if aligned_missing is not None else None
     return downsampled, down_missing
 
 
@@ -96,12 +120,17 @@ def build_timeseries_figure(
         df, bar_column, indicator_columns, missing_mask, max_display_points
     )
 
+    if missing_mask is not None:
+        missing_mask = missing_mask.reindex(df.index, fill_value=False).fillna(False).astype(bool)
+
     if df.index.tz is not None:
         # tz付きのDatetimeIndexはPandasのTimestampオブジェクトのまま(dtype=object)で
         # 保持されるため、Kaleido v1のシリアライザ(orjson)がJSON化に失敗し画像出力が
         # 例外で落ちる。表示は常にJSTのローカル時刻のままでよいため、tz情報だけを
         # 落として(数値は変えず)ネイティブなdatetime64にし、シリアライズ可能にする。
         df = df.tz_localize(None)
+        if missing_mask is not None:
+            missing_mask.index = df.index
 
     fig = make_subplots(
         rows=2,
@@ -152,7 +181,7 @@ def build_timeseries_figure(
                 x=df.index,
                 y=df[col],
                 mode="lines",
-                name=INDICATOR_LABELS.get(col, col),
+                name=indicator_label(col, with_unit=True),
                 line=dict(color=sc["color"], dash=sc["dash"], width=style.line_width),
             ),
             row=2,

@@ -66,7 +66,9 @@ def resolve_duplicates(candidates: list[CandidateRecord]) -> ResolvedRecord:
     distinct_values = {c.rainfall_raw_mm for c in top_candidates}
     is_conflicting = len(distinct_values) > 1
 
-    chosen = top_candidates[0]
+    # 同一品質で「値あり」と「値なし」が混在する異常データでは、値ありを優先する。
+    # それでも値が異なる場合は従来どおり競合として残し、決定順を安定させる。
+    chosen = next((c for c in top_candidates if c.rainfall_raw_mm is not None), top_candidates[0])
     return ResolvedRecord(
         rainfall_raw_mm=chosen.rainfall_raw_mm,
         quality_code=chosen.quality_code,

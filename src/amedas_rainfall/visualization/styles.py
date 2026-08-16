@@ -6,6 +6,8 @@ import platform
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+BASE_CSS_DPI = 96.0
+
 PREFERRED_JAPANESE_FONTS = ["Yu Gothic", "Meiryo", "Noto Sans CJK JP", "sans-serif"]
 
 _WINDOWS_FONT_FILE_HINTS = {
@@ -99,12 +101,14 @@ class PlotStyle:
 
     def width_px(self) -> float:
         if self.size_unit == "mm":
-            return self.width / 25.4 * self.dpi
+            # Plotlyへ渡す寸法はCSSピクセル(96dpi)。PNGの実DPI倍率は
+            # export_figure側で一度だけ適用する。
+            return self.width / 25.4 * BASE_CSS_DPI
         return self.width
 
     def height_px(self) -> float:
         if self.size_unit == "mm":
-            return self.height / 25.4 * self.dpi
+            return self.height / 25.4 * BASE_CSS_DPI
         return self.height
 
     def to_dict(self) -> dict:

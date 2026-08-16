@@ -17,10 +17,15 @@ from amedas_rainfall.jma.ame_master_pdf import (
     parse_ame_master_pdf,
     save_ame_master_pdf_cache,
 )
-from amedas_rainfall.jma.direct_client import JmaDirectClient
+from amedas_rainfall.jma.client_factory import create_jma_client
 from amedas_rainfall.jma.download_manager import DownloadManager, DownloadManagerConfig
-from amedas_rainfall.jma.start_date_finder import default_start_year_hint, find_earliest_valid_year
+from amedas_rainfall.jma.start_date_finder import (
+    StartDateProbeError,
+    default_start_year_hint,
+    find_earliest_valid_year,
+)
 from amedas_rainfall.jma.station_catalog import (
+    StationMasterBuildError,
     build_station_master,
     load_station_master,
     save_station_master,
@@ -33,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 JST = dt.timezone(dt.timedelta(hours=9))
 
-DOWNLOAD_CHUNK_SIZE = 3
+DOWNLOAD_CHUNK_SIZE = 1
 """1回のStreamlitスクリプト実行で処理するダウンロードジョブ数の上限。
 
 大きくすると1回あたりの処理時間が延び画面の応答性が下がり、小さくすると
@@ -59,41 +64,49 @@ def render_station_page(config: AppConfig) -> None:
             "地点マスタを更新", help="気象庁サイトから全都道府県の地点一覧を再取得します（数分かかります）",
             key="station_refresh_master_button",
         ):
-            with st.spinner("地点マスタを取得しています（都道府県ごとに待機時間を挟みます）..."):
-                client = JmaDirectClient(user_agent=config.get("download.user_agent"))
-                progress = st.progress(0.0)
-                status_text = st.empty()
+            try:
+                with st.spinner("地点マスタを取得しています（都道府県ごとに待機時間を挟みます）..."):
+                    progress = st.progress(0.0)
+                    status_text = st.empty()
 
-                def _cb(i: int, total: int, label: str) -> None:
-                    progress.progress(i / total)
-                    status_text.text(f"{i}/{total}: {label}")
+                    def _cb(i: int, total: int, label: str) -> None:
+                        progress.progress(i / total)
+                        status_text.text(f"{i}/{total}: {label}")
 
-                df = build_station_master(
-                    client, wait_seconds=config.get("download.normal_wait_seconds", 3.0), progress_callback=_cb
-                )
+                    with create_jma_client(config) as client:
+                        df = build_station_master(
+                            client,
+                            wait_seconds=config.get("download.normal_wait_seconds", 3.0),
+                            progress_callback=_cb,
+                        )
 
-                status_text.text("気象庁「地域気象観測所一覧」PDFから降水量観測開始日を取得しています...")
-                try:
-                    pdf_bytes = fetch_ame_master_pdf_bytes(
-                        url=config.get(
-                            "jma_master_pdf.url",
-                            "https://www.jma.go.jp/jma/kishou/know/amedas/ame_master.pdf",
-                        ),
-                        user_agent=config.get("download.user_agent"),
-                    )
-                    ame_master_df = parse_ame_master_pdf(pdf_bytes)
-                    save_ame_master_pdf_cache(ame_master_df, _ame_master_pdf_cache_path(config))
-                    df = attach_precip_start_dates(df, ame_master_df)
-                except AmeMasterPdfError:
-                    logger.exception("観測所一覧PDFの取得・解析に失敗しました。降水量観測開始日は未設定のままとします。")
-                    st.warning(
-                        "気象庁「地域気象観測所一覧」PDFの取得・解析に失敗しました。"
-                        "降水量観測開始日は未設定のままになります（「開始年を探索する」による手動調査は引き続き利用できます）。"
-                    )
+                    status_text.text("気象庁「地域気象観測所一覧」PDFから降水量観測開始日を取得しています...")
+                    try:
+                        pdf_bytes = fetch_ame_master_pdf_bytes(
+                            url=config.get(
+                                "jma_master_pdf.url",
+                                "https://www.jma.go.jp/jma/kishou/know/amedas/ame_master.pdf",
+                            ),
+                            user_agent=config.get("download.user_agent"),
+                        )
+                        ame_master_df = parse_ame_master_pdf(pdf_bytes)
+                        save_ame_master_pdf_cache(ame_master_df, _ame_master_pdf_cache_path(config))
+                        df = attach_precip_start_dates(df, ame_master_df)
+                    except AmeMasterPdfError:
+                        logger.exception("観測所一覧PDFの取得・解析に失敗しました。")
+                        st.warning(
+                            "観測所一覧PDFの取得・解析に失敗しました。開始年の手動探索は利用できます。"
+                        )
 
-                save_station_master(df, master_path)
-            st.success(f"{len(df)}件の地点情報を取得しました。")
-            st.session_state.pop("station_master_df", None)
+                    save_station_master(df, master_path)
+                st.success(f"{len(df)}件の地点情報を取得しました。")
+                st.session_state.pop("station_master_df", None)
+            except StationMasterBuildError as exc:
+                logger.exception("地点マスタの更新に失敗しました。")
+                st.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("地点マスタの更新中に予期しないエラーが発生しました。")
+                st.error(f"地点マスタを更新できませんでした。通信状態を確認して再試行してください: {exc}")
 
     with col2:
         if station_master_cache_exists(master_path):
@@ -130,9 +143,9 @@ def render_station_page(config: AppConfig) -> None:
     if selected_pref != "すべて":
         filtered = filtered[filtered["prefecture"] == selected_pref]
     if name_filter:
-        filtered = filtered[filtered["station_name"].str.contains(name_filter, na=False)]
+        filtered = filtered[filtered["station_name"].str.contains(name_filter, na=False, regex=False)]
     if code_filter:
-        filtered = filtered[filtered["station_code"].str.contains(code_filter, na=False)]
+        filtered = filtered[filtered["station_code"].str.contains(code_filter, na=False, regex=False)]
     if only_observing:
         filtered = filtered[filtered["is_currently_observing"]]
     if only_precip:
@@ -146,7 +159,7 @@ def render_station_page(config: AppConfig) -> None:
         "latitude", "longitude", "elevation_m", "is_currently_observing",
         "has_precipitation_observation",
     ]
-    st.dataframe(filtered[display_cols], use_container_width=True, height=300)
+    st.dataframe(filtered[display_cols], width="stretch", height=300)
 
     station_options = filtered["station_code"] + " / " + filtered["station_name"] + "（" + filtered["prefecture"] + "）"
     if station_options.empty:
@@ -176,7 +189,7 @@ def render_station_page(config: AppConfig) -> None:
             height=350,
             margin=dict(t=0, b=0, l=0, r=0),
         )
-        st.plotly_chart(fig, use_container_width=True, theme=None)
+        st.plotly_chart(fig, width="stretch", theme=None)
 
     pdf_precip_start_date = station_row.get("precip_start_date")
     if pdf_precip_start_date is not None and pd.notna(pdf_precip_start_date):
@@ -214,25 +227,31 @@ def render_station_page(config: AppConfig) -> None:
         )
 
     manual_year = st.number_input(
-        "探索開始年（手動修正可）", min_value=1875, max_value=dt.date.today().year, value=hint_year,
+        "探索開始年（手動修正可）", min_value=1875, max_value=dt.date.today().year,
         key="station_manual_year",
     )
 
     if st.button("開始年を探索する", key="station_search_start_year_button"):
-        client = JmaDirectClient(user_agent=config.get("download.user_agent"))
-        with st.spinner("観測開始年を探索しています..."):
-            result = find_earliest_valid_year(
-                client,
-                selected_code,
-                candidate_year_hint=int(manual_year),
-                current_year=dt.date.today().year,
-                wait_seconds=config.get("download.normal_wait_seconds", 3.0),
-            )
-        st.session_state["start_search_result"] = result
-        if result.earliest_valid_datetime:
-            # st.date_inputはkeyが既にsession_stateにある場合value引数を無視するため、
-            # ここでウィジェット生成前に直接書き換える。ユーザーは以降自由に変更できる。
-            st.session_state["station_plan_start"] = dt.date(result.earliest_valid_datetime.year, 1, 1)
+        try:
+            with st.spinner("観測開始年を探索しています..."):
+                with create_jma_client(config) as client:
+                    result = find_earliest_valid_year(
+                        client,
+                        selected_code,
+                        candidate_year_hint=int(manual_year),
+                        current_year=dt.date.today().year,
+                        wait_seconds=config.get("download.normal_wait_seconds", 3.0),
+                    )
+            st.session_state["start_search_result"] = result
+            if result.earliest_valid_datetime:
+                st.session_state["station_plan_start"] = dt.date(
+                    result.earliest_valid_datetime.year, 1, 1
+                )
+        except StartDateProbeError as exc:
+            st.error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("観測開始年の探索に失敗しました。")
+            st.error(f"観測開始年を探索できませんでした: {exc}")
 
     if "start_search_result" in st.session_state:
         result = st.session_state["start_search_result"]
@@ -259,7 +278,8 @@ def render_station_page(config: AppConfig) -> None:
     else:
         # 3. どちらもなければ従来どおりの粗いヒントにフォールバックする。
         default_start = dt.date(int(manual_year), 1, 1)
-    plan_start = st.date_input("開始日", value=default_start, key="station_plan_start")
+    st.session_state.setdefault("station_plan_start", default_start)
+    plan_start = st.date_input("開始日", key="station_plan_start")
     yesterday = dt.date.today() - dt.timedelta(days=1)
     plan_end = st.date_input(
         "終了日（最新取得可能日）", value=yesterday, max_value=yesterday, key="station_plan_end"
@@ -279,14 +299,24 @@ def render_station_page(config: AppConfig) -> None:
         normal_wait_seconds=config.get("download.normal_wait_seconds", 3.0),
         min_wait_seconds=config.get("download.min_wait_seconds", 2.0),
         retry_wait_seconds=tuple(config.get("download.retry_wait_seconds", [10, 30, 120])),
+        backoff_multiplier=config.get("download.backoff_multiplier", 2.0),
         max_retries_per_span=config.get("download.max_retries_per_span", 5),
+        split_sequence=tuple(
+            config.get(
+                "download.split_sequence", ["1year", "6month", "3month", "1month", "7day"]
+            )
+        ),
     )
-    client = JmaDirectClient(user_agent=config.get("download.user_agent"))
+    # DownloadManager側が停止可能な共有スロット待機を行うため、ここだけ二重適用を避ける。
+    client = create_jma_client(config, global_throttle=False)
     manager = DownloadManager(client, job_repo, config.resolved_path("paths.raw_dir"), manager_config)
 
     if st.button("ダウンロード計画を作成/更新", key="station_create_plan_button"):
-        job_ids = manager.plan_jobs(selected_code, plan_start, plan_end)
-        st.success(f"{len(job_ids)}件の年単位ジョブを計画しました（既存分は再作成しません）。")
+        try:
+            job_ids = manager.plan_jobs(selected_code, plan_start, plan_end)
+            st.success(f"{len(job_ids)}件の年単位ジョブを計画しました（既存分は再利用します）。")
+        except ValueError as exc:
+            st.error(str(exc))
 
     jobs = job_repo.get_jobs_for_station(selected_code)
     if jobs:
@@ -295,12 +325,12 @@ def render_station_page(config: AppConfig) -> None:
                 {
                     "開始日": j.start_date, "終了日": j.end_date, "状態": j.status.value,
                     "試行回数": j.attempt_count, "行数": j.row_count, "保存ファイル": j.saved_file,
-                    "エラー": j.error_message,
+                    "次回試行": j.next_attempt_at, "エラー": j.error_message,
                 }
                 for j in jobs
             ]
         )
-        st.dataframe(jobs_df, use_container_width=True, height=250)
+        st.dataframe(jobs_df, width="stretch", height=250)
 
         non_split_jobs = [j for j in jobs if j.status != JobStatus.SPLIT]
         n_pending = sum(
@@ -309,8 +339,12 @@ def render_station_page(config: AppConfig) -> None:
         )
         n_success = sum(1 for j in non_split_jobs if j.status in (JobStatus.SUCCESS, JobStatus.VALIDATED))
         n_failed = sum(1 for j in non_split_jobs if j.status == JobStatus.FAILED)
+        n_cancelled = sum(1 for j in non_split_jobs if j.status == JobStatus.CANCELLED)
         n_total = len(non_split_jobs)
-        st.caption(f"完了: {n_success} / 未完了: {n_pending} / 失敗: {n_failed} / 合計: {n_total}")
+        st.caption(
+            f"完了: {n_success} / 未完了: {n_pending} / 失敗: {n_failed} / "
+            f"計画外: {n_cancelled} / 合計: {n_total}"
+        )
         n_stuck = sum(1 for j in non_split_jobs if j.status == JobStatus.DOWNLOADING)
         if n_stuck and not st.session_state.get(f"auto_download_running_{selected_code}", False):
             st.warning(
@@ -326,7 +360,7 @@ def render_station_page(config: AppConfig) -> None:
         with b1:
             start_download = st.button(
                 "ダウンロード開始", key="station_run_batch_button", type="primary",
-                use_container_width=True, disabled=is_running,
+                width="stretch", disabled=is_running,
             )
         with b2:
             if st.button("失敗・中断ジョブを再試行対象に戻す", key="station_retry_failed_button"):
@@ -335,12 +369,12 @@ def render_station_page(config: AppConfig) -> None:
                 st.rerun()
         with b3:
             start_analysis = st.button(
-                "データ解析", key="station_rebuild_normalized_button", use_container_width=True,
+                "データ解析", key="station_rebuild_normalized_button", width="stretch",
                 disabled=is_running,
             )
         with b4:
             stop_download = st.button(
-                "ダウンロード停止", key="station_stop_download_button", use_container_width=True,
+                "ダウンロード停止", key="station_stop_download_button", width="stretch",
                 disabled=not is_running,
             )
 
@@ -375,10 +409,14 @@ def render_station_page(config: AppConfig) -> None:
                     f"データ解析が完了しました（{len(merged)}時間分）。"
                     "計算結果は保存されるため、次回以降は再計算不要です。"
                 )
-            except FileNotFoundError as exc:
-                analysis_status.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("データ解析に失敗しました。")
+                analysis_status.error(f"データ解析に失敗しました: {exc}")
 
         if start_download:
+            reset_count = manager.reconcile_validated_files(selected_code)
+            if reset_count:
+                st.warning(f"破損または欠落している保存済みCSV {reset_count}件を再取得対象に戻しました。")
             st.session_state[auto_run_key] = True
             is_running = True
 
@@ -411,18 +449,37 @@ def render_station_page(config: AppConfig) -> None:
                 progress_bar.progress(ratio)
                 percent_text.text(f"{done}/{total}件 完了（{ratio * 100:.0f}%）")
 
-            manager.run(
-                selected_code, station_row["station_name"], progress_callback=_progress,
-                max_jobs=DOWNLOAD_CHUNK_SIZE,
-            )
+            try:
+                manager.run(
+                    selected_code, station_row["station_name"], progress_callback=_progress,
+                    max_jobs=DOWNLOAD_CHUNK_SIZE,
+                )
+            finally:
+                client.close()
 
             remaining = manager.job_repo.get_actionable_jobs(selected_code)
             if remaining:
                 st.rerun()
             else:
                 st.session_state[auto_run_key] = False
-                status_banner.success("ダウンロードが完了しました。")
-                progress_bar.progress(1.0)
-                st.rerun()
+                waiting = manager.job_repo.get_waiting_retry_jobs(selected_code)
+                failed = manager.job_repo.get_failed_jobs(selected_code)
+                if waiting:
+                    next_time = min(
+                        (job.next_attempt_at for job in waiting if job.next_attempt_at), default=None
+                    )
+                    status_banner.warning(
+                        f"再試行待ちが{len(waiting)}件あります。"
+                        + (f" 次回試行可能: {next_time:%Y-%m-%d %H:%M:%S}" if next_time else "")
+                        + " 時刻を過ぎてから「ダウンロード開始」を押すと再開します。"
+                    )
+                elif failed:
+                    status_banner.warning(
+                        f"取得処理は終了しましたが、失敗が{len(failed)}件あります。"
+                        "詳細を確認し、必要なら再試行対象に戻してください。"
+                    )
+                else:
+                    status_banner.success("ダウンロードと保存ファイル検証が完了しました。")
+                    progress_bar.progress(1.0)
     else:
         st.info("まだダウンロード計画がありません。「ダウンロード計画を作成/更新」を押してください。")

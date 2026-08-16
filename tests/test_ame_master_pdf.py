@@ -6,8 +6,6 @@ import datetime as dt
 from pathlib import Path
 
 import pandas as pd
-import pytest
-
 from amedas_rainfall.jma.ame_master_pdf import (
     attach_precip_start_dates,
     parse_ame_master_pdf,

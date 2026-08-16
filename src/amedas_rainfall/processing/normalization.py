@@ -43,4 +43,12 @@ def reindex_to_continuous_hourly(df: pd.DataFrame, tz: str = JST) -> pd.DataFram
     if df.empty:
         return df
     full_index = build_continuous_hourly_index(df.index.min(), df.index.max(), tz=tz)
-    return df.reindex(full_index)
+    result = df.reindex(full_index)
+    synthetic_missing = result[RAW_COLUMN].isna()
+    if "is_missing" in result.columns:
+        result["is_missing"] = result["is_missing"].fillna(synthetic_missing).astype(bool)
+    else:
+        result["is_missing"] = synthetic_missing
+    if "is_conflicting" in result.columns:
+        result["is_conflicting"] = result["is_conflicting"].fillna(False).astype(bool)
+    return result

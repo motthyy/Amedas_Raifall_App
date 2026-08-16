@@ -8,11 +8,22 @@ import pandas as pd
 import streamlit as st
 
 from amedas_rainfall.config import AppConfig
+from amedas_rainfall.indicators import annual_indicator_columns, indicator_label
 from amedas_rainfall.pipeline import normalized_hourly_path
-from amedas_rainfall.ui.common import ensure_indices_loaded, render_interactive_chart
-from amedas_rainfall.visualization.export import build_export_filename, export_figure, save_plot_settings
+from amedas_rainfall.ui.common import (
+    apply_plot_style_to_session,
+    default_plot_style,
+    ensure_indices_loaded,
+    render_interactive_chart,
+)
+from amedas_rainfall.visualization.export import (
+    build_export_filename,
+    export_figure,
+    load_plot_settings,
+    save_plot_settings,
+)
 from amedas_rainfall.visualization.styles import PlotStyle
-from amedas_rainfall.visualization.timeseries import INDICATOR_LABELS, build_timeseries_figure
+from amedas_rainfall.visualization.timeseries import build_timeseries_figure
 
 PERIOD_PRESETS = ["最新31日", "今月", "前月", "全期間", "任意期間"]
 
@@ -48,6 +59,34 @@ def render_timeseries_page(config: AppConfig) -> None:
         return
 
     indices_df = ensure_indices_loaded(config, station_code)
+    indicator_options = [
+        column
+        for column in [
+            *annual_indicator_columns(indices_df.columns),
+            "soil_tank_1_mm",
+            "soil_tank_2_mm",
+            "soil_tank_3_mm",
+        ]
+        if column in indices_df.columns and column != "rainfall_raw_mm"
+    ]
+
+    settings_path = (
+        config.resolved_path("paths.output_dir")
+        / "plot_settings"
+        / f"{station_code}_timeseries_settings.json"
+    )
+    if settings_path.exists() and st.button("保存したグラフ設定を読み込む", key="ts_load_settings_button"):
+        style, extra = load_plot_settings(settings_path)
+        st.session_state[f"ts_style_{station_code}"] = style
+        apply_plot_style_to_session("ts", style)
+        saved_indicators = [
+            value for value in extra.get("indicators", []) if value in indicator_options
+        ]
+        if saved_indicators:
+            st.session_state["ts_selected_indicators"] = saved_indicators
+        if extra.get("preset") in PERIOD_PRESETS:
+            st.session_state["ts_period_preset"] = extra["preset"]
+        st.rerun()
 
     if st.button("指標を再計算する", key="ts_recompute_button"):
         ensure_indices_loaded(config, station_code, force_recompute=True)
@@ -100,19 +139,19 @@ def render_timeseries_page(config: AppConfig) -> None:
 
     st.subheader("表示項目")
     bar_column = "rainfall_raw_mm"
-    indicator_options = list(INDICATOR_LABELS.keys())
+    default_indicators = ["soil_rainfall_mm"] if "soil_rainfall_mm" in indicator_options else indicator_options[:1]
     selected_indicators = st.multiselect(
         "下段（折れ線グラフ、複数選択可）",
         indicator_options,
-        default=["soil_rainfall_mm"],
-        format_func=lambda c: INDICATOR_LABELS.get(c, c),
+        default=default_indicators,
+        format_func=lambda c: indicator_label(c, with_unit=True),
         key="ts_selected_indicators",
     )
 
     with st.expander("グラフ調整"):
         style_key = f"ts_style_{station_code}"
         if style_key not in st.session_state:
-            st.session_state[style_key] = PlotStyle(title=f"{station_name} 時系列")
+            st.session_state[style_key] = default_plot_style(config, title=f"{station_name} 時系列")
         style: PlotStyle = st.session_state[style_key]
 
         cc1, cc2, cc3 = st.columns(3)
@@ -123,9 +162,12 @@ def render_timeseries_page(config: AppConfig) -> None:
             style.width = st.number_input("図幅", value=float(style.width), key="ts_fig_width")
             style.height = st.number_input("図高", value=float(style.height), key="ts_fig_height")
         with cc2:
+            dpi_choices = list(config.get("figure_export.default_dpi_choices", [300, 600, 1200]))
+            if style.dpi not in dpi_choices:
+                dpi_choices.append(style.dpi)
             style.dpi = st.selectbox(
-                "DPI(PNG用)", [300, 600, 1200],
-                index=[300, 600, 1200].index(style.dpi) if style.dpi in (300, 600, 1200) else 0,
+                "DPI(PNG用)", dpi_choices,
+                index=dpi_choices.index(style.dpi),
                 key="ts_fig_dpi",
             )
             style.font_size = st.number_input("基本フォントサイズ", value=style.font_size, key="ts_font_size")
@@ -141,7 +183,9 @@ def render_timeseries_page(config: AppConfig) -> None:
         style.subtitle = st.text_input("サブタイトル", value=style.subtitle, key="ts_subtitle")
         style.note = st.text_area("注記", value=style.note, key="ts_note")
 
-    missing_mask = view["is_missing"] if "is_missing" in view.columns else None
+    missing_mask = view["rainfall_raw_mm"].isna()
+    if "is_missing" in view.columns:
+        missing_mask = missing_mask | view["is_missing"].fillna(False).astype(bool)
     fig = build_timeseries_figure(view, bar_column, selected_indicators, style, missing_mask=missing_mask)
     render_interactive_chart(fig, key=f"ts_chart_{station_code}")
 
@@ -153,16 +197,17 @@ def render_timeseries_page(config: AppConfig) -> None:
         out_dir = config.resolved_path("paths.output_dir") / "figures"
         out_path = out_dir / filename
         export_figure(fig, out_path, fmt, style.width_px(), style.height_px(), dpi=style.dpi)
+        st.session_state[f"ts_image_export_{station_code}"] = out_path
         st.success(f"保存しました: {out_path}")
-        with open(out_path, "rb") as f:
-            st.download_button("ダウンロード", f.read(), file_name=filename, key="ts_dl")
+    image_path = st.session_state.get(f"ts_image_export_{station_code}")
+    if image_path and image_path.exists():
+        st.download_button(
+            "画像をダウンロード", image_path.read_bytes(), file_name=image_path.name,
+            key=f"ts_dl_{station_code}",
+            on_click="ignore",
+        )
 
     if st.button("グラフ設定を保存(JSON)", key="ts_save_settings_button"):
-        settings_path = (
-            config.resolved_path("paths.output_dir")
-            / "plot_settings"
-            / f"{station_code}_timeseries_settings.json"
-        )
         save_plot_settings(
             style,
             {"bar_column": bar_column, "indicators": selected_indicators, "preset": preset},

@@ -46,7 +46,8 @@ def test_warmup_and_reset_flags_after_gap() -> None:
     s = _series([10.0, 5.0, np.nan, np.nan, 3.0])
     result = calculate_effective_rainfall(s, half_life_hours=6.0, column_name="e")
     assert result[WARMUP_COLUMN].iloc[0]
-    assert result[RESET_DUE_TO_GAP_COLUMN].iloc[0]
+    # 系列先頭の初期化は欠測による再初期化ではない。
+    assert not result[RESET_DUE_TO_GAP_COLUMN].iloc[0]
     assert not result[WARMUP_COLUMN].iloc[1]
     assert result[WARMUP_COLUMN].iloc[4]
     assert result[RESET_DUE_TO_GAP_COLUMN].iloc[4]

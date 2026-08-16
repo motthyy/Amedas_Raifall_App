@@ -11,8 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-import pytest
-
 from amedas_rainfall.reporting import _strip_timezone_for_excel, build_full_excel_workbook
 
 

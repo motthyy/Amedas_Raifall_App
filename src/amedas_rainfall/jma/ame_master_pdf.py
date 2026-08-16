@@ -5,11 +5,8 @@ https://www.jma.go.jp/jma/kishou/know/amedas/ame_master.pdf には、全国の
 記載されている。
 
 地点マスタ（station_catalog.py）の実測プロービング（start_date_finder.py）は
-気象庁サイトへ実際にCSVをリクエストして年ごとの有無を探る方式だが、その年の
-1月1〜2日だけを見て判定するため、年の途中から観測を開始した地点（後述の
-「#」表記の地点など）では真の開始年より遅い年を誤って報告することがある。
-本モジュールはこの問題を避けるため、PDFに記載された公式の観測開始年月日を
-権威あるデータソースとして取得・解析する。
+気象庁サイトへ実際に年全体のCSVをリクエストして有効値を探す。通常は本PDFに記載された
+公式の観測開始年月日を初期値として利用し、必要な場合だけ実測探索で確認する。
 
 PDF内の「観測開始年月日」欄の表記規則（PDF内の凡例および実データ確認による）:
     - 単純な日付のみ（例 ``昭52.10.19``）: 降水量を含む全観測要素がその日付から開始。
@@ -36,6 +33,7 @@ import pdfplumber
 import requests
 
 from amedas_rainfall.jma.ca_bundle import ensure_ca_bundle_path
+from amedas_rainfall.storage.files import atomic_write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -250,8 +248,7 @@ def _row_to_record(row: list, header_map: dict[str, int]) -> dict | None:
 
 
 def save_ame_master_pdf_cache(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    atomic_write_parquet(df, path, index=False)
 
 
 def load_ame_master_pdf_cache(path: Path) -> pd.DataFrame:

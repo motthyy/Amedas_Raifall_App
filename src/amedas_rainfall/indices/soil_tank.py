@@ -20,6 +20,16 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+try:
+    from numba import njit
+
+    NUMBA_AVAILABLE = True
+except ImportError:  # 最小構成・開発環境では同じ関数を純Pythonで実行する。
+    NUMBA_AVAILABLE = False
+
+    def njit(function):  # type: ignore[misc]
+        return function
+
 TEN_MIN_COLUMN = "rainfall_10min_mm"
 TANK1_COLUMN = "soil_tank_1_mm"
 TANK2_COLUMN = "soil_tank_2_mm"
@@ -27,6 +37,67 @@ TANK3_COLUMN = "soil_tank_3_mm"
 SOIL_INDEX_COLUMN = "soil_rainfall_mm"
 
 ZERO_FLOOR_MM = 0.3
+
+
+@njit
+def _run_hourly_tank_kernel(
+    values: np.ndarray,
+    dt_hours: float,
+    initial: np.ndarray,
+    outlet_heights_1: np.ndarray,
+    outlet_coefficients_1: np.ndarray,
+    outlet_heights_2: np.ndarray,
+    outlet_coefficients_2: np.ndarray,
+    outlet_heights_3: np.ndarray,
+    outlet_coefficients_3: np.ndarray,
+    infiltration_coefficients: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Numbaでネイティブ化可能な、時別入力→6回更新の数値計算本体。"""
+    n = len(values)
+    s1 = np.full(n, np.nan)
+    s2 = np.full(n, np.nan)
+    s3 = np.full(n, np.nan)
+    cur1, cur2, cur3 = initial[0], initial[1], initial[2]
+    pending_reset = True
+
+    for i in range(n):
+        hourly_rain = values[i]
+        if np.isnan(hourly_rain):
+            pending_reset = True
+            continue
+        if pending_reset:
+            cur1, cur2, cur3 = initial[0], initial[1], initial[2]
+            pending_reset = False
+
+        rain_10min = hourly_rain / 6.0
+        for _ in range(6):
+            storage1 = cur1 + rain_10min
+            out1 = 0.0
+            for j in range(len(outlet_heights_1)):
+                if storage1 > outlet_heights_1[j]:
+                    out1 += outlet_coefficients_1[j] * (storage1 - outlet_heights_1[j]) * dt_hours
+            inf1 = infiltration_coefficients[0] * storage1 * dt_hours
+            cur1 = max(storage1 - out1 - inf1, 0.0)
+
+            storage2 = cur2 + inf1
+            out2 = 0.0
+            for j in range(len(outlet_heights_2)):
+                if storage2 > outlet_heights_2[j]:
+                    out2 += outlet_coefficients_2[j] * (storage2 - outlet_heights_2[j]) * dt_hours
+            inf2 = infiltration_coefficients[1] * storage2 * dt_hours
+            cur2 = max(storage2 - out2 - inf2, 0.0)
+
+            storage3 = cur3 + inf2
+            out3 = 0.0
+            for j in range(len(outlet_heights_3)):
+                if storage3 > outlet_heights_3[j]:
+                    out3 += outlet_coefficients_3[j] * (storage3 - outlet_heights_3[j]) * dt_hours
+            inf3 = infiltration_coefficients[2] * storage3 * dt_hours
+            cur3 = max(storage3 - out3 - inf3, 0.0)
+
+        s1[i], s2[i], s3[i] = cur1, cur2, cur3
+
+    return s1, s2, s3
 
 
 def disaggregate_hourly_to_10min(rainfall_raw_mm: pd.Series) -> pd.Series:
@@ -81,7 +152,7 @@ class TankModelConfig:
                 infiltration_coefficient_per_hour=node["infiltration_coefficient_per_hour"],
             )
 
-        return cls(
+        config = cls(
             time_step_hours=raw.get("time_step_hours", 1.0 / 6.0),
             tank1=_spec("tank1"),
             tank2=_spec("tank2"),
@@ -90,6 +161,18 @@ class TankModelConfig:
                 "initial_storage_mm", {"tank1": 0.0, "tank2": 0.0, "tank3": 0.0}
             ),
         )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.time_step_hours <= 0:
+            raise ValueError("time_step_hoursは0より大きい値で指定してください。")
+        for name, spec in (("tank1", self.tank1), ("tank2", self.tank2), ("tank3", self.tank3)):
+            if spec.infiltration_coefficient_per_hour < 0:
+                raise ValueError(f"{name}の浸透係数は0以上で指定してください。")
+            for outlet in spec.outlets:
+                if outlet.height_mm < 0 or outlet.coefficient_per_hour < 0:
+                    raise ValueError(f"{name}の流出孔設定は0以上で指定してください。")
 
 
 def _side_outflow_mm(storage_mm: float, spec: TankSpec, dt_hours: float) -> float:
@@ -225,3 +308,71 @@ def calculate_soil_rainfall(
     tank_10min = run_tank_model_10min(rainfall_10min, config, progress_callback=progress_callback)
     tank_hourly = aggregate_tank_result_to_hourly(tank_10min)
     return tank_10min, tank_hourly
+
+
+def calculate_soil_rainfall_hourly(
+    rainfall_raw_mm: pd.Series,
+    config: TankModelConfig,
+    progress_callback: Callable[[float], None] | None = None,
+) -> pd.DataFrame:
+    """10分値の巨大な中間DataFrameを保持せず、時別タンク値だけを計算する。
+
+    各時雨量を6等分して逐次更新する点は ``calculate_soil_rainfall`` と同一。
+    Pythonアプリの通常パイプラインではこの省メモリ版を使用する。
+    """
+    config.validate()
+    values = rainfall_raw_mm.to_numpy(dtype=float)
+    if progress_callback is not None:
+        progress_callback(0.0)
+    initial = np.asarray(
+        [
+            config.initial_storage_mm.get("tank1", 0.0),
+            config.initial_storage_mm.get("tank2", 0.0),
+            config.initial_storage_mm.get("tank3", 0.0),
+        ],
+        dtype=float,
+    )
+
+    def _outlets(spec: TankSpec) -> tuple[np.ndarray, np.ndarray]:
+        return (
+            np.asarray([outlet.height_mm for outlet in spec.outlets], dtype=float),
+            np.asarray([outlet.coefficient_per_hour for outlet in spec.outlets], dtype=float),
+        )
+
+    heights1, coefficients1 = _outlets(config.tank1)
+    heights2, coefficients2 = _outlets(config.tank2)
+    heights3, coefficients3 = _outlets(config.tank3)
+    infiltration_coefficients = np.asarray(
+        [
+            config.tank1.infiltration_coefficient_per_hour,
+            config.tank2.infiltration_coefficient_per_hour,
+            config.tank3.infiltration_coefficient_per_hour,
+        ],
+        dtype=float,
+    )
+    s1, s2, s3 = _run_hourly_tank_kernel(
+        values,
+        config.time_step_hours,
+        initial,
+        heights1,
+        coefficients1,
+        heights2,
+        coefficients2,
+        heights3,
+        coefficients3,
+        infiltration_coefficients,
+    )
+    if progress_callback is not None:
+        progress_callback(1.0)
+
+    total = s1 + s2 + s3
+    total = np.where(np.isnan(total) | (total >= ZERO_FLOOR_MM), total, 0.0)
+    return pd.DataFrame(
+        {
+            TANK1_COLUMN: s1,
+            TANK2_COLUMN: s2,
+            TANK3_COLUMN: s3,
+            SOIL_INDEX_COLUMN: total,
+        },
+        index=rainfall_raw_mm.index,
+    )

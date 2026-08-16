@@ -90,8 +90,8 @@ class RawStationEntry:
         return self.discontinued_text is not None
 
 
-_TITLE_NAME_RE = re.compile(r"地点名[：:]\s*(.+)")
-_TITLE_KANA_RE = re.compile(r"カナ[：:]\s*(.+)")
+_TITLE_NAME_RE = re.compile(r"地点名[：:]\s*(.+?)(?=\s+(?:カナ|北緯|東経|標高)[：:]|$)")
+_TITLE_KANA_RE = re.compile(r"カナ[：:]\s*(.+?)(?=\s+(?:北緯|東経|標高)[：:]|$)")
 _TITLE_LAT_RE = re.compile(r"北緯[：:]\s*([0-9.]+)度\s*([0-9.]+)分")
 _TITLE_LON_RE = re.compile(r"東経[：:]\s*([0-9.]+)度\s*([0-9.]+)分")
 _TITLE_ELEV_RE = re.compile(r"標高[：:]\s*([0-9.\-]+)m")
@@ -201,6 +201,10 @@ class JmaDirectClient:
                 kansoku=kansoku_input.get("value", "").strip() if kansoku_input else "",
                 **parsed_title,
             )
+        if not entries:
+            raise JmaDirectClientError(
+                f"都道府県コード{prid}の地点一覧を解析できませんでした。サイト仕様を確認してください。"
+            )
         return list(entries.values())
 
     def download_hourly_precipitation_csv(
@@ -244,8 +248,13 @@ class JmaDirectClient:
         resp = self.session.post(SHOW_TABLE_URL, data=payload, timeout=self.timeout_seconds)
         resp.raise_for_status()
         content_type = resp.headers.get("Content-Type", "")
+        if "html" in content_type.lower():
+            raise JmaDirectClientError("CSVの代わりにHTML応答が返されました。")
         if "octet-stream" not in content_type and "text" not in content_type:
             raise JmaDirectClientError(f"想定外のContent-Typeです: {content_type}")
         if len(resp.content) == 0:
             raise JmaDirectClientError("空のレスポンスが返されました。")
+        prefix = resp.content.lstrip()[:32].lower()
+        if prefix.startswith((b"<!doctype html", b"<html")):
+            raise JmaDirectClientError("CSVの代わりにHTML応答が返されました。")
         return resp.content

@@ -8,6 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 from amedas_rainfall.statistics.gumbel import GumbelResult, empirical_return_periods
+from amedas_rainfall.statistics.bootstrap import BootstrapResult
 from amedas_rainfall.visualization.styles import PlotStyle
 
 
@@ -20,6 +21,7 @@ def build_probability_figure(
     show_fit_line: bool = True,
     x_log: bool = True,
     indicator_label: str = "指標",
+    confidence_intervals: dict[float, BootstrapResult] | None = None,
 ) -> go.Figure:
     """年最大値のプロッティングポジションとガンベル適合曲線を描画する。"""
     fig = go.Figure()
@@ -28,6 +30,32 @@ def build_probability_figure(
     data = np.sort(np.asarray(annual_maxima, dtype=float))
     data = data[~np.isnan(data)]
     n = len(data)
+
+    if confidence_intervals:
+        intervals = [
+            value
+            for _, value in sorted(confidence_intervals.items())
+            if value.return_period_years > 1
+            and math.isfinite(value.lower)
+            and math.isfinite(value.upper)
+        ]
+        if intervals:
+            x_ci = [value.return_period_years for value in intervals]
+            upper = [value.upper for value in intervals]
+            lower = [value.lower for value in intervals]
+            fig.add_trace(
+                go.Scatter(
+                    x=x_ci, y=upper, mode="lines", line=dict(width=0),
+                    hoverinfo="skip", showlegend=False,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_ci, y=lower, mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor="rgba(31,119,180,0.18)",
+                    name="ブートストラップ信頼区間",
+                )
+            )
 
     if show_observed and n > 0:
         t_m = empirical_return_periods(n, method=plotting_position)

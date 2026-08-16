@@ -217,6 +217,8 @@ def _hour24_to_datetime(year: int, month: int, day: int, hour: int) -> pd.Timest
     if hour == 24:
         base = pd.Timestamp(year=year, month=month, day=day) + pd.Timedelta(days=1)
         return base
+    if not 0 <= hour <= 23:
+        raise JmaCsvFormatError(f"時の値が範囲外です: {hour}")
     return pd.Timestamp(year=year, month=month, day=day, hour=hour)
 
 

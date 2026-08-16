@@ -54,6 +54,7 @@ year_boundaries:
 annual_maxima:
   completeness_threshold_percent: 95.0
   exclude_incomplete_start_year: true
+  exclude_incomplete_end_year: true
   exclude_ongoing_latest_year: true
   exclude_below_completeness: true
   exclude_state_reset_unreliable: true
@@ -83,3 +84,7 @@ figure_export:
 
 timezone: "Asia/Tokyo"
 locale: "ja_JP"
+
+logging:
+  level: "INFO"
+  backup_days: 14

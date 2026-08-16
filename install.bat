@@ -27,7 +27,7 @@ echo.
 set "STATUS_PY_LAUNCHER=py -3.11"
 where py >nul 2>nul
 if errorlevel 1 set "STATUS_PY_LAUNCHER=python"
-%STATUS_PY_LAUNCHER% -c "import sys" >nul 2>nul
+%STATUS_PY_LAUNCHER% -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.version_info.releaselevel == 'final' else 1)" >nul 2>nul
 if errorlevel 1 (
     echo [NG] Python 3.11            : not found
 ) else (
@@ -129,7 +129,7 @@ goto :check_version
 set PY_LAUNCHER=py -3.11
 where py >nul 2>nul
 if errorlevel 1 goto :use_python_command
-%PY_LAUNCHER% -c "import sys" >nul 2>nul
+%PY_LAUNCHER% -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.version_info.releaselevel == 'final' else 1)" >nul 2>nul
 if errorlevel 1 goto :use_python_command
 goto :check_version
 
@@ -147,7 +147,24 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+%PY_LAUNCHER% -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.version_info.releaselevel == 'final' else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] This app requires a stable Python 3.11 release.
+    echo The selected command points to another version or a prerelease.
+    echo Re-run install.bat and choose option 1, or install Python 3.11 manually.
+    pause
+    exit /b 1
+)
 
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and sys.version_info.releaselevel == 'final' else 1)" >nul 2>nul
+    if errorlevel 1 (
+        echo [ERROR] Existing .venv was created with an incompatible Python version.
+        echo Rename or remove the project-local .venv folder, then run install.bat again.
+        pause
+        exit /b 1
+    )
+)
 if exist ".venv" goto :venv_exists
 echo Creating virtual environment .venv ...
 %PY_LAUNCHER% -m venv .venv
@@ -210,6 +227,25 @@ if errorlevel 1 (
 
 echo Installing this project in editable mode ...
 call ".venv\Scripts\python.exe" -m pip install -e .
+if errorlevel 1 (
+    echo [ERROR] Failed to install the project package.
+    pause
+    exit /b 1
+)
+
+echo Verifying installed packages and application imports ...
+call ".venv\Scripts\python.exe" -m pip check
+if errorlevel 1 (
+    echo [ERROR] Installed packages have incompatible dependencies.
+    pause
+    exit /b 1
+)
+call ".venv\Scripts\python.exe" -c "from amedas_rainfall.config import get_default_config; get_default_config(); import amedas_rainfall.ui.station_page, amedas_rainfall.ui.probability_page"
+if errorlevel 1 (
+    echo [ERROR] Application smoke test failed. Review the error shown above.
+    pause
+    exit /b 1
+)
 
 echo ============================================================
 echo Setup complete.

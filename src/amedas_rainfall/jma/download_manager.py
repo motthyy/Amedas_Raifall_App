@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+import pandas as pd
+
 from amedas_rainfall.models import JobStatus
+from amedas_rainfall.jma.csv_parser import ParsedJmaCsv, parse_jma_hourly_precipitation_csv
+from amedas_rainfall.storage.files import atomic_write_bytes
 from amedas_rainfall.storage.repositories import JobRepository
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,14 @@ class DownloadManagerConfig:
     split_sequence: tuple[str, ...] = ("1year", "6month", "3month", "1month", "7day")
 
     def __post_init__(self) -> None:
+        if self.min_wait_seconds < 0 or self.normal_wait_seconds < 0:
+            raise ValueError("待機時間は0以上で指定してください。")
+        if not self.retry_wait_seconds or any(value < 0 for value in self.retry_wait_seconds):
+            raise ValueError("retry_wait_secondsは0以上の値を1件以上指定してください。")
+        if self.backoff_multiplier < 1:
+            raise ValueError("backoff_multiplierは1以上で指定してください。")
+        if self.max_retries_per_span < 0:
+            raise ValueError("max_retries_per_spanは0以上で指定してください。")
         if self.normal_wait_seconds < self.min_wait_seconds:
             self.normal_wait_seconds = self.min_wait_seconds
 
@@ -65,30 +78,20 @@ def split_into_year_spans(start: dt.date, end: dt.date) -> list[tuple[dt.date, d
     return spans
 
 
-_SPAN_DAYS = {"6month": 183, "3month": 91, "1month": 31, "7day": 7}
-
-
 def split_span_further(start: dt.date, end: dt.date, split_key: str) -> list[tuple[dt.date, dt.date]]:
     """失敗した期間をより小さい単位へ分割する（5.2節: 6か月→3か月→1か月→7日）。"""
-    if split_key == "6month":
-        mid = _add_months(start, 6)
-        first_end = min(mid - dt.timedelta(days=1), end)
-    elif split_key == "3month":
-        mid = _add_months(start, 3)
-        first_end = min(mid - dt.timedelta(days=1), end)
-    elif split_key == "1month":
-        mid = _add_months(start, 1)
-        first_end = min(mid - dt.timedelta(days=1), end)
-    elif split_key == "7day":
-        first_end = min(start + dt.timedelta(days=6), end)
-    else:
+    month_steps = {"6month": 6, "3month": 3, "1month": 1}
+    if split_key not in (*month_steps, "7day"):
         raise ValueError(f"未知の分割キー: {split_key}")
 
     spans = []
     cur = start
-    step_days = _SPAN_DAYS[split_key]
     while cur <= end:
-        step_end = min(cur + dt.timedelta(days=step_days - 1), end)
+        if split_key == "7day":
+            next_start = cur + dt.timedelta(days=7)
+        else:
+            next_start = _add_months(cur, month_steps[split_key])
+        step_end = min(next_start - dt.timedelta(days=1), end)
         spans.append((cur, step_end))
         cur = step_end + dt.timedelta(days=1)
     return spans
@@ -119,6 +122,9 @@ class DownloadManager:
 
     def plan_jobs(self, station_code: str, start: dt.date, end: dt.date) -> list[int]:
         """1年単位の初期ジョブを計画する（既存ジョブは再作成しない）。"""
+        if start > end:
+            raise ValueError("ダウンロード開始日は終了日以前にしてください。")
+        self.job_repo.cancel_jobs_outside_range(station_code, start, end)
         job_ids = []
         for span_start, span_end in split_into_year_spans(start, end):
             job_ids.append(self.job_repo.create_job_if_absent(station_code, span_start, span_end))
@@ -140,7 +146,7 @@ class DownloadManager:
                 され画面が無応答になるため、小さい値を指定して複数回に分けて呼び出すこと
                 （ui/station_page.pyの自動継続ループを参照）。
         """
-        station_dir = self.raw_dir / f"{station_code}_{station_name}"
+        station_dir = self.raw_dir / station_code
         station_dir.mkdir(parents=True, exist_ok=True)
 
         processed = 0
@@ -148,24 +154,27 @@ class DownloadManager:
             if stop_flag and stop_flag():
                 logger.info("ユーザー操作により一時停止しました。")
                 return
-            jobs = self.job_repo.get_actionable_jobs(station_code)
-            if not jobs:
+            job = self.job_repo.claim_next_actionable_job(station_code)
+            if job is None:
                 return
-            job = jobs[0]
+            wait_seconds = self.job_repo.reserve_request_slot(
+                "jma_obsdl", max(self.config.normal_wait_seconds, self.config.min_wait_seconds)
+            )
+            while wait_seconds > 0:
+                if stop_flag and stop_flag():
+                    self.job_repo.update_job(job.job_id, status=JobStatus.PENDING.value)
+                    return
+                chunk = min(wait_seconds, 0.25)
+                time.sleep(chunk)
+                wait_seconds -= chunk
             self._execute_job(job, station_dir, progress_callback)
             processed += 1
-            time.sleep(max(self.config.normal_wait_seconds, self.config.min_wait_seconds))
             if max_jobs is not None and processed >= max_jobs:
                 return
 
     def _execute_job(self, job, station_dir: Path, progress_callback: Callable[[str], None] | None) -> None:
         assert job.job_id is not None
         span_days = (job.end_date - job.start_date).days + 1
-        now = dt.datetime.now(tz=JST)
-
-        self.job_repo.update_job(
-            job.job_id, status=JobStatus.DOWNLOADING.value, last_attempt_at=now.isoformat()
-        )
         if progress_callback:
             progress_callback(f"{job.station_code}: {job.start_date} 〜 {job.end_date} を取得中...")
 
@@ -179,20 +188,53 @@ class DownloadManager:
                 job.end_date.month,
                 job.end_date.day,
             )
+            parsed = self._validate_download(content, job.start_date, job.end_date)
             filename = f"{job.station_code}_{job.start_date.isoformat()}_{job.end_date.isoformat()}.csv"
             filepath = station_dir / filename
-            filepath.write_bytes(content)
+            atomic_write_bytes(filepath, content)
+            digest = hashlib.sha256(content).hexdigest()
+            min_datetime = parsed.frame.index.min().to_pydatetime()
+            max_datetime = parsed.frame.index.max().to_pydatetime()
 
             self.job_repo.update_job(
                 job.job_id,
-                status=JobStatus.SUCCESS.value,
+                status=JobStatus.VALIDATED.value,
                 saved_file=str(filepath),
                 file_size_bytes=len(content),
+                file_sha256=digest,
+                row_count=len(parsed.frame),
+                min_datetime=min_datetime.isoformat(),
+                max_datetime=max_datetime.isoformat(),
                 attempt_count=job.attempt_count + 1,
+                error_message=None,
+                next_attempt_at=None,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ダウンロード失敗 (station=%s, %s〜%s): %s", job.station_code, job.start_date, job.end_date, exc)
             self._handle_failure(job, span_days, str(exc))
+
+    @staticmethod
+    def _validate_download(
+        content: bytes, start_date: dt.date, end_date: dt.date
+    ) -> ParsedJmaCsv:
+        parsed = parse_jma_hourly_precipitation_csv(content)
+        if parsed.frame.empty:
+            raise ValueError("CSVに時別データ行がありません。")
+        expected_index = pd.date_range(
+            start=pd.Timestamp(start_date, tz="Asia/Tokyo") + pd.Timedelta(hours=1),
+            end=pd.Timestamp(end_date + dt.timedelta(days=1), tz="Asia/Tokyo"),
+            freq="h",
+        )
+        if parsed.frame.index.has_duplicates:
+            raise ValueError("CSV内に重複する時別タイムスタンプがあります。")
+        missing = expected_index.difference(parsed.frame.index)
+        extra = parsed.frame.index.difference(expected_index)
+        if len(missing) or len(extra):
+            raise ValueError(
+                "CSVの時別行が要求期間を完全には覆っていません: "
+                f"不足{len(missing)}時間 / 範囲外{len(extra)}時間"
+            )
+        return parsed
 
     def _handle_failure(self, job, span_days: int, error_message: str) -> None:
         assert job.job_id is not None
@@ -211,6 +253,7 @@ class DownloadManager:
                 status=JobStatus.FAILED.value,
                 attempt_count=attempt_count,
                 error_message=error_message,
+                next_attempt_at=None,
             )
             return
 
@@ -223,9 +266,8 @@ class DownloadManager:
             status=JobStatus.RETRY_WAIT.value,
             attempt_count=attempt_count,
             error_message=error_message,
+            next_attempt_at=(dt.datetime.now(tz=JST) + dt.timedelta(seconds=wait_seconds)).isoformat(),
         )
-        time.sleep(wait_seconds)
-        self.job_repo.update_job(job.job_id, status=JobStatus.PENDING.value)
 
     def retry_failed(self, station_code: str) -> int:
         """FAILED状態、および異常終了で中断されたDOWNLOADING状態のジョブをPENDINGへ戻す。
@@ -238,5 +280,34 @@ class DownloadManager:
         failed = self.job_repo.get_failed_jobs(station_code)
         stuck = self.job_repo.get_stuck_downloading_jobs(station_code)
         for job in failed + stuck:
-            self.job_repo.update_job(job.job_id, status=JobStatus.PENDING.value, error_message=None)
+            self.job_repo.update_job(
+                job.job_id,
+                status=JobStatus.PENDING.value,
+                error_message=None,
+                next_attempt_at=None,
+            )
         return len(failed) + len(stuck)
+
+    def reconcile_validated_files(self, station_code: str) -> int:
+        """成功済みファイルの欠落・サイズ・ハッシュ不一致を再取得対象へ戻す。"""
+        reset_count = 0
+        for job in self.job_repo.get_successful_jobs(station_code):
+            path = Path(job.saved_file) if job.saved_file else None
+            reason = None
+            if path is None or not path.exists():
+                reason = "保存済みCSVが見つかりません。"
+            elif job.file_size_bytes is not None and path.stat().st_size != job.file_size_bytes:
+                reason = "保存済みCSVのサイズが記録と一致しません。"
+            elif job.file_sha256:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                if digest != job.file_sha256:
+                    reason = "保存済みCSVのハッシュが記録と一致しません。"
+            if reason:
+                self.job_repo.update_job(
+                    job.job_id,
+                    status=JobStatus.PENDING.value,
+                    error_message=reason,
+                    next_attempt_at=None,
+                )
+                reset_count += 1
+        return reset_count

@@ -26,6 +26,8 @@ ZERO_FLOOR_MM = 0.3
 
 def half_life_to_decay_rate(half_life_hours: float) -> float:
     """半減期から1時間あたりの残存率 a_H を求める。"""
+    if half_life_hours <= 0:
+        raise ValueError("half_life_hoursは0より大きい値で指定してください。")
     return 0.5 ** (1.0 / half_life_hours)
 
 
@@ -55,13 +57,20 @@ def calculate_effective_rainfall(
     warmup = np.zeros(n, dtype=bool)
 
     prev = 0.0
-    pending_reset = True
+    pending_reset = False
+    seen_valid = False
     for i in range(n):
         val = values[i]
         if np.isnan(val):
-            pending_reset = True
+            if seen_valid:
+                pending_reset = True
             continue
-        if pending_reset:
+        if not seen_valid:
+            prev = 0.0
+            warmup[i] = True
+            seen_valid = True
+            cur = val + decay * prev
+        elif pending_reset:
             prev = 0.0
             warmup[i] = True
             reset_due_to_gap[i] = True

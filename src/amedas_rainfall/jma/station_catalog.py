@@ -12,8 +12,13 @@ import pandas as pd
 
 from amedas_rainfall.jma.direct_client import JmaDirectClient, RawStationEntry
 from amedas_rainfall.models import Station, StationType
+from amedas_rainfall.storage.files import atomic_write_parquet
 
 logger = logging.getLogger(__name__)
+
+
+class StationMasterBuildError(RuntimeError):
+    """一部地域の取得失敗により完全な地点マスタを構築できない。"""
 
 STATION_MASTER_COLUMNS = [
     "prefecture",
@@ -75,6 +80,7 @@ def build_station_master(
     fetched_at = dt.datetime.now(tz=dt.timezone(dt.timedelta(hours=9)))
     prefectures = client.fetch_prefecture_codes()
     rows: list[dict] = []
+    failed_prefectures: list[str] = []
     total = len(prefectures)
     for i, (prid, label) in enumerate(prefectures):
         if progress_callback:
@@ -83,20 +89,25 @@ def build_station_master(
             entries = client.fetch_stations_for_prefecture(prid)
         except Exception:
             logger.exception("都道府県コード %s の地点一覧取得に失敗しました。", prid)
+            failed_prefectures.append(f"{label}({prid})")
             entries = []
         for entry in entries:
             rows.append(_raw_entry_to_row(entry, label, fetched_at))
         if i < total - 1:
             time.sleep(wait_seconds)
 
+    if failed_prefectures:
+        raise StationMasterBuildError(
+            "地点一覧を取得できなかった地域があります。既存キャッシュは維持されます: "
+            + "、".join(failed_prefectures)
+        )
     df = pd.DataFrame(rows, columns=STATION_MASTER_COLUMNS)
     df = df.drop_duplicates(subset=["station_code"]).reset_index(drop=True)
     return df
 
 
 def save_station_master(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    atomic_write_parquet(df, path, index=False)
 
 
 def load_station_master(path: Path) -> pd.DataFrame:

@@ -10,11 +10,9 @@ from amedas_rainfall.pipeline import (
     compute_completeness_all_boundaries,
     load_normalized_hourly,
     normalized_hourly_path,
+    year_boundaries,
 )
 from amedas_rainfall.storage.repositories import JobRepository
-
-BOUNDARY_LABELS = {"calendar": "暦年", "fiscal": "年度", "june_start": "6月始まり年"}
-
 
 def render_quality_page(config: AppConfig) -> None:
     st.header("データ品質")
@@ -41,7 +39,7 @@ def render_quality_page(config: AppConfig) -> None:
                 for j in jobs
             ]
         )
-        st.dataframe(jobs_df, use_container_width=True, height=200)
+        st.dataframe(jobs_df, width="stretch", height=200)
     else:
         st.info("ダウンロードジョブがまだありません。")
 
@@ -53,7 +51,10 @@ def render_quality_page(config: AppConfig) -> None:
     hourly = load_normalized_hourly(config, station_code)
 
     st.subheader("欠測・重複・競合の状況")
-    n_missing = int(hourly["is_missing"].sum()) if "is_missing" in hourly.columns else None
+    missing_mask = hourly["rainfall_raw_mm"].isna()
+    if "is_missing" in hourly.columns:
+        missing_mask = missing_mask | hourly["is_missing"].fillna(False).astype(bool)
+    n_missing = int(missing_mask.sum())
     n_conflict = int(hourly["is_conflicting"].sum()) if "is_conflicting" in hourly.columns else None
     c1, c2, c3 = st.columns(3)
     c1.metric("総時間数", len(hourly))
@@ -62,18 +63,31 @@ def render_quality_page(config: AppConfig) -> None:
 
     if n_conflict:
         st.dataframe(
-            hourly[hourly["is_conflicting"]][["rainfall_raw_mm", "quality_code", "source_file"]],
-            use_container_width=True,
+            hourly[hourly["is_conflicting"]][
+                [
+                    column
+                    for column in (
+                        "rainfall_raw_mm", "quality_code", "source_file",
+                        "conflict_values", "conflict_sources",
+                    )
+                    if column in hourly.columns
+                ]
+            ],
+            width="stretch",
         )
 
     st.subheader("年別データ完全率")
     threshold = st.slider(
-        "採用可否の完全率閾値(%)", min_value=50.0, max_value=100.0, value=95.0, step=0.5,
+        "採用可否の完全率閾値(%)", min_value=50.0, max_value=100.0,
+        value=float(config.get("annual_maxima.completeness_threshold_percent", 95.0)), step=0.5,
         key="quality_completeness_threshold",
     )
-    completeness = compute_completeness_all_boundaries(hourly, completeness_threshold_percent=threshold)
+    completeness = compute_completeness_all_boundaries(
+        hourly, completeness_threshold_percent=threshold, config=config
+    )
 
-    for key, label in BOUNDARY_LABELS.items():
+    for key, boundary in year_boundaries(config).items():
+        label = boundary.label
         st.markdown(f"**{label}**")
         rows = completeness.get(key, [])
         if not rows:
@@ -96,7 +110,7 @@ def render_quality_page(config: AppConfig) -> None:
                 for r in rows
             ]
         )
-        st.dataframe(table, use_container_width=True, height=200)
+        st.dataframe(table, width="stretch", height=200)
 
     st.subheader("推定開始日時・最終有効日時")
     valid_idx = hourly.index[hourly["rainfall_raw_mm"].notna()] if "rainfall_raw_mm" in hourly.columns else []

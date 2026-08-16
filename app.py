@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import sys
 from pathlib import Path
 
@@ -30,17 +31,24 @@ from amedas_rainfall.ui.timeseries_page import render_timeseries_page  # noqa: E
 def _setup_logging(config) -> None:
     logs_dir = config.resolved_path("paths.logs_dir")
     logs_dir.mkdir(parents=True, exist_ok=True)
-    import datetime as dt
-
-    log_path = logs_dir / f"app_{dt.date.today():%Y%m%d}.log"
+    log_path = logs_dir / "app.log"
     root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        root_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        root_logger.addHandler(file_handler)
+    root_logger.setLevel(getattr(logging, str(config.get("logging.level", "INFO")).upper(), logging.INFO))
+    if any(getattr(handler, "name", None) == "amedas_file_log" for handler in root_logger.handlers):
+        return
+    file_handler = TimedRotatingFileHandler(
+        log_path,
+        when="midnight",
+        interval=1,
+        backupCount=int(config.get("logging.backup_days", 14)),
+        encoding="utf-8",
+    )
+    file_handler.name = "amedas_file_log"
+    file_handler.suffix = "%Y%m%d"
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    root_logger.addHandler(file_handler)
 
 
 def main() -> None:
@@ -48,7 +56,11 @@ def main() -> None:
         page_title="アメダス長期雨量・鉄道防災指標解析アプリ",
         layout="wide",
     )
-    config = get_default_config()
+    try:
+        config = get_default_config()
+    except (OSError, ValueError) as exc:
+        st.error(f"設定ファイルを読み込めませんでした。config/default.yamlを確認してください。\n\n{exc}")
+        st.stop()
     _setup_logging(config)
 
     st.title("アメダス長期雨量・鉄道防災指標解析アプリ")
@@ -100,7 +112,14 @@ def main() -> None:
         "ページ選択", list(pages.keys()), horizontal=True, key="active_page", label_visibility="collapsed"
     )
     st.divider()
-    pages[selected_page](config)
+    try:
+        pages[selected_page](config)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("画面処理中に予期しないエラーが発生しました。")
+        st.error(
+            "処理を完了できませんでした。入力内容と通信状態を確認して再試行してください。"
+            f"\n\n詳細: {exc}\n\nログ: {config.resolved_path('paths.logs_dir') / 'app.log'}"
+        )
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ class JobStatus(str, Enum):
     RETRY_WAIT = "RETRY_WAIT"
     SPLIT = "SPLIT"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass
@@ -70,10 +71,12 @@ class DownloadJob:
     saved_file: str | None = None
     row_count: int | None = None
     file_size_bytes: int | None = None
+    file_sha256: str | None = None
     min_datetime: dt.datetime | None = None
     max_datetime: dt.datetime | None = None
     error_message: str | None = None
     last_attempt_at: dt.datetime | None = None
+    next_attempt_at: dt.datetime | None = None
     job_id: int | None = None
 
 

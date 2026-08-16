@@ -24,6 +24,18 @@ PLOTTING_POSITION_FORMULAS = {
 }
 
 
+def _validated_sample(annual_maxima: np.ndarray, label: str) -> np.ndarray:
+    data = np.asarray(annual_maxima, dtype=float)
+    data = data[~np.isnan(data)]
+    if len(data) < 2:
+        raise ValueError(f"{label}には少なくとも2年分の年最大値が必要です。")
+    if not np.isfinite(data).all():
+        raise ValueError("年最大値に無限値が含まれているため推定できません。")
+    if float(np.ptp(data)) <= max(1e-12, abs(float(np.mean(data))) * 1e-12):
+        raise ValueError("年最大値に変動がないためガンベル分布を推定できません。")
+    return data
+
+
 @dataclass
 class GumbelParameters:
     loc_mu: float
@@ -52,11 +64,10 @@ class GumbelResult:
 
 def fit_gumbel_mle(annual_maxima: np.ndarray) -> GumbelParameters:
     """最尤法によるガンベル分布パラメータ推定（scipy.stats.gumbel_rを使用）。"""
-    data = np.asarray(annual_maxima, dtype=float)
-    data = data[~np.isnan(data)]
-    if len(data) < 2:
-        raise ValueError("最尤推定には少なくとも2年分の年最大値が必要です。")
+    data = _validated_sample(annual_maxima, "最尤推定")
     loc, scale = stats.gumbel_r.fit(data)
+    if not math.isfinite(loc) or not math.isfinite(scale) or scale <= 0:
+        raise ValueError("最尤推定が有限なパラメータへ収束しませんでした。")
     return GumbelParameters(loc_mu=float(loc), scale_beta=float(scale), method="mle", n_samples=len(data))
 
 
@@ -66,30 +77,37 @@ def fit_gumbel_moments(annual_maxima: np.ndarray) -> GumbelParameters:
     beta = sqrt(6) * s / pi   （sは母標準偏差、Excelの STDEV.P に相当。ddof=0）
     mu = mean - 0.5772 * beta
     """
-    data = np.asarray(annual_maxima, dtype=float)
-    data = data[~np.isnan(data)]
-    if len(data) < 2:
-        raise ValueError("積率法には少なくとも2年分の年最大値が必要です。")
+    data = _validated_sample(annual_maxima, "積率法")
     mean = float(np.mean(data))
     std = float(np.std(data, ddof=0))
     beta = math.sqrt(6.0) * std / math.pi
     mu = mean - EULER_MASCHERONI * beta
+    if not math.isfinite(mu) or not math.isfinite(beta) or beta <= 0:
+        raise ValueError("積率法で有限かつ正の尺度パラメータを算出できませんでした。")
     return GumbelParameters(loc_mu=mu, scale_beta=beta, method="moments", n_samples=len(data))
 
 
 def gumbel_cdf(x: float | np.ndarray, mu: float, beta: float) -> float | np.ndarray:
+    if not math.isfinite(mu) or not math.isfinite(beta) or beta <= 0:
+        raise ValueError("ガンベル分布のmu/betaが不正です。")
     return np.exp(-np.exp(-(np.asarray(x) - mu) / beta))
 
 
 def return_period_value(mu: float, beta: float, return_period_years: float) -> float:
     """確率年Tに対する確率雨量 x_T を計算する。T=1年は算出不可としてNaNを返す。"""
-    if return_period_years <= 1.0:
+    if not math.isfinite(return_period_years) or return_period_years < 1.0:
+        raise ValueError("確率年は1以上の有限値で指定してください。")
+    if return_period_years == 1.0:
         return float("nan")
+    if not math.isfinite(mu) or not math.isfinite(beta) or beta <= 0:
+        raise ValueError("ガンベル分布のmu/betaが不正です。")
     return mu - beta * math.log(-math.log(1.0 - 1.0 / return_period_years))
 
 
 def return_period_from_value(mu: float, beta: float, x: float) -> float:
     """雨量xに対応する確率年Tを計算する（ガンベル分布の逆関数）。F=1のときはinfを返す。"""
+    if not math.isfinite(x):
+        raise ValueError("雨量は有限値で指定してください。")
     f = float(gumbel_cdf(x, mu, beta))
     if f >= 1.0:
         return float("inf")
@@ -109,6 +127,8 @@ def plotting_positions(
     """プロッティングポジション公式による非超過確率F_mを、昇順順位m=1..nに対して返す。"""
     if method not in PLOTTING_POSITION_FORMULAS:
         raise ValueError(f"未知のプロッティングポジション法: {method}")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        raise ValueError("標本数nは1以上の整数にしてください。")
     a, b = PLOTTING_POSITION_FORMULAS[method]
     m = np.arange(1, n + 1, dtype=float)
     return (m - a) / (n + b)

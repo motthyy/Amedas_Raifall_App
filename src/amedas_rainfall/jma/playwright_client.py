@@ -64,11 +64,15 @@ class JmaPlaywrightClient:
         ca_bundle_path = ensure_ca_bundle_path()
         if ca_bundle_path is not None:
             os.environ.setdefault("NODE_EXTRA_CA_CERTS", ca_bundle_path)
-        self._pw = self._sync_playwright_factory().start()
-        self._browser = self._pw.chromium.launch(headless=self.headless)
-        self._context = self._browser.new_context()
-        self._page = self._context.new_page()
-        self._page.goto(INDEX_URL, timeout=self.timeout_ms)
+        try:
+            self._pw = self._sync_playwright_factory().start()
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+            self._context = self._browser.new_context()
+            self._page = self._context.new_page()
+            self._page.goto(INDEX_URL, timeout=self.timeout_ms)
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -78,9 +82,15 @@ class JmaPlaywrightClient:
             self._browser.close()
         if self._pw is not None:
             self._pw.stop()
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._pw = None
 
     def fetch_prefecture_codes(self) -> list[tuple[str, str]]:
         resp = self._context.request.post(STATION_URL, form={"pd": "00"})
+        if not resp.ok:
+            raise JmaPlaywrightClientError(f"都道府県一覧の取得に失敗しました: HTTP {resp.status}")
         html = resp.text()
         from bs4 import BeautifulSoup
 
@@ -102,6 +112,8 @@ class JmaPlaywrightClient:
 
     def fetch_stations_for_prefecture(self, prid: str) -> list[RawStationEntry]:
         resp = self._context.request.post(STATION_URL, form={"pd": prid})
+        if not resp.ok:
+            raise JmaPlaywrightClientError(f"地点一覧の取得に失敗しました: HTTP {resp.status}")
         html = resp.text()
         from bs4 import BeautifulSoup
 
@@ -118,13 +130,17 @@ class JmaPlaywrightClient:
             prid_input = div.find("input", attrs={"name": "prid"})
             kansoku_input = div.find("input", attrs={"name": "kansoku"})
             title = div.get("title", "") or ""
-            parsed_title = _parse_title_text(title)
+            parsed_title = parse_station_title_text(title)
             entries[stid] = RawStationEntry(
                 stid=stid,
                 stname=stname_input.get("value", "").strip() if stname_input else "",
                 prid=prid_input.get("value", "").strip() if prid_input else prid,
                 kansoku=kansoku_input.get("value", "").strip() if kansoku_input else "",
                 **parsed_title,
+            )
+        if not entries:
+            raise JmaPlaywrightClientError(
+                f"都道府県コード{prid}の地点一覧を解析できませんでした。"
             )
         return list(entries.values())
 
@@ -160,7 +176,12 @@ class JmaPlaywrightClient:
             "jikantaiList": "[]",
         }
         resp = self._context.request.post(SHOW_TABLE_URL, form=payload)
+        if not resp.ok:
+            raise JmaPlaywrightClientError(f"CSV取得に失敗しました: HTTP {resp.status}")
         body = resp.body()
         if not body:
             raise JmaPlaywrightClientError("空のレスポンスが返されました。")
+        prefix = body.lstrip()[:32].lower()
+        if prefix.startswith((b"<!doctype html", b"<html")):
+            raise JmaPlaywrightClientError("CSVの代わりにHTML応答が返されました。")
         return body
